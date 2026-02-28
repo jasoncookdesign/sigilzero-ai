@@ -1,0 +1,163 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: sz_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: sz_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24
+    container_name: sz_clickhouse
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/users.d/langfuse-user.xml:/etc/clickhouse-server/users.d/langfuse-user.xml:ro
+      - ./clickhouse/config.d/langfuse-single-node.xml:/etc/clickhouse-server/config.d/langfuse-single-node.xml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  minio:
+    image: minio/minio
+    container_name: sz_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9001:9001"
+      - "9002:9000"
+    volumes:
+      - minio_data:/data
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: sz_langfuse_web
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: ${LANGFUSE_DATABASE_URL}
+      REDIS_URL: ${LANGFUSE_REDIS_URL}
+
+      CLICKHOUSE_URL: clickhouse://langfuse:changeme_clickhouse@clickhouse:9000
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse:changeme_clickhouse@clickhouse:9000
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: changeme_clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+
+      S3_ENDPOINT: ${LANGFUSE_S3_ENDPOINT}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      S3_BUCKET: ${LANGFUSE_S3_BUCKET}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET}
+
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: sz_langfuse_worker
+    restart: unless-stopped
+    depends_on:
+      langfuse-web:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${LANGFUSE_DATABASE_URL}
+      REDIS_URL: ${LANGFUSE_REDIS_URL}
+
+      CLICKHOUSE_URL: clickhouse://langfuse:changeme_clickhouse@clickhouse:9000
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse:changeme_clickhouse@clickhouse:9000
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: changeme_clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+
+      S3_ENDPOINT: ${LANGFUSE_S3_ENDPOINT}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      S3_BUCKET: ${LANGFUSE_S3_BUCKET}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET}
+
+      NEXTAUTH_URL: http://langfuse-web:3000
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+
+  sigil-api:
+    build: ./app
+    container_name: sz_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+      langfuse-web:
+        condition: service_started
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: ${APP_DATABASE_URL}
+      REDIS_URL: ${APP_REDIS_URL}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_HOST: http://langfuse-web:3000
+
+  sigil-worker:
+    build: ./app
+    container_name: sz_worker
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${APP_DATABASE_URL}
+      REDIS_URL: ${APP_REDIS_URL}
+    command: ["sh", "-lc", "rq worker sigilzero"]
+
+volumes:
+  postgres_data:
+  redis_data:
+  clickhouse_data:
+  minio_data:

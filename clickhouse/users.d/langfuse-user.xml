@@ -1,0 +1,22 @@
+<clickhouse>
+  <users>
+    <langfuse>
+      <password>changeme_clickhouse</password>
+      <networks>
+        <!-- allow from docker network -->
+        <ip>::/0</ip>
+      </networks>
+
+      <!-- sensible defaults for local dev -->
+      <profile>default</profile>
+      <quota>default</quota>
+      <access_management>0</access_management>
+    </langfuse>
+  </users>
+
+  <profiles>
+    <default>
+      <log_queries>1</log_queries>
+    </default>
+  </profiles>
+</clickhouse>

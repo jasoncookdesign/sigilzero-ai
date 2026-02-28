@@ -1,0 +1,35 @@
+<clickhouse>
+  <!-- Required for ReplicatedMergeTree paths like /clickhouse/tables/{uuid}/{shard} -->
+  <macros>
+    <shard>01</shard>
+    <replica>01</replica>
+  </macros>
+
+  <!-- Single-node cluster named "default" -->
+  <remote_servers>
+    <default>
+      <shard>
+        <replica>
+          <host>clickhouse</host>
+          <port>9000</port>
+        </replica>
+      </shard>
+    </default>
+  </remote_servers>
+
+  <!-- Enable ClickHouse Keeper (built-in ZK replacement) -->
+  <keeper_server>
+    <tcp_port>9181</tcp_port>
+    <server_id>1</server_id>
+    <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+    <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+  </keeper_server>
+
+  <!-- Point "zookeeper" client config at Keeper -->
+  <zookeeper>
+    <node>
+      <host>127.0.0.1</host>
+      <port>9181</port>
+    </node>
+  </zookeeper>
+</clickhouse>
