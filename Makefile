@@ -19,6 +19,10 @@ smoke_determinism:
 	@echo "Running Phase 1.0 Determinism Smoke Tests..."
 	docker exec sz_worker python /app/scripts/smoke_determinism.py
 
+smoke_generation_modes:
+	@echo "Running Stage 5 Generation Modes Smoke Tests..."
+	docker exec sz_worker python /app/scripts/smoke_generation_modes.py
+
 reindex:
 	@echo "Rebuilding DB index from filesystem manifests..."
 	docker exec -e DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres:5432/postgres sz_worker python /app/scripts/reindex_artifacts.py

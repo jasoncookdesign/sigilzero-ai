@@ -42,6 +42,14 @@ class BriefSpec(BaseModel):
     # Instagram-specific config for Phase 0
     ig: IGControlBlock = Field(default_factory=IGControlBlock)
 
+    # Generation modes (Stage 5): control output strategy
+    # single: generate 1 output (default)
+    # variants: generate N deterministic variations
+    # format: control output format flexibility
+    generation_mode: Literal["single", "variants", "format"] = Field(default="single")
+    caption_variants: int = Field(default=1, ge=1, le=20)  # For variants mode
+    output_formats: List[Literal["md", "json", "yaml"]] = Field(default_factory=lambda: ["md"])  # For format mode
+
     # Input blocks (e.g. "post_context", "notes", etc.)
     blocks: List[BriefBlock] = Field(default_factory=list)
 
@@ -239,6 +247,9 @@ class RunManifest(BaseModel):
     
     # Langfuse tracing
     langfuse_trace_id: Optional[str] = None
+    
+    # Stage 5: Generation mode metadata (for variants, format, etc.)
+    generation_metadata: Dict[str, Any] = Field(default_factory=dict)
     
     # Outputs and metadata
     artifacts: Dict[str, Dict[str, Any]] = Field(default_factory=dict)

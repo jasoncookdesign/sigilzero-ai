@@ -448,53 +448,160 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
         else:
             span_gen = None
 
-        raw = generate_text(prompt=prompt, generation_spec=gen_spec.model_dump())
-
-        if span_gen is not None:
-            span_gen.end(output={"raw_chars": len(raw)})
-
-        # Parse into package (very small, safe parser)
-        captions: List[IGCaption] = []
-        lines = [ln.rstrip() for ln in raw.splitlines()]
-        current: List[str] = []
-        for ln in lines:
-            if ln.strip().startswith("---") and current:
+        # Helper: parse raw text into captions
+        def _parse_captions(raw: str) -> List[IGCaption]:
+            captions: List[IGCaption] = []
+            lines = [ln.rstrip() for ln in raw.splitlines()]
+            current: List[str] = []
+            for ln in lines:
+                if ln.strip().startswith("---") and current:
+                    cap = "\n".join(current).strip()
+                    if cap:
+                        captions.append(IGCaption(caption=cap, hashtags=[]))
+                    current = []
+                else:
+                    current.append(ln)
+            if current:
                 cap = "\n".join(current).strip()
                 if cap:
                     captions.append(IGCaption(caption=cap, hashtags=[]))
-                current = []
+            return captions
+
+        # Stage 5: Support generation modes
+        variants: List[Dict[str, Any]] = []
+        seeds_used = {}
+        
+        num_variants = 1 if brief.generation_mode == "single" else brief.caption_variants
+        
+        for variant_idx in range(num_variants):
+            # Compute deterministic seed for this variant
+            if brief.generation_mode == "variants" and num_variants > 1:
+                seed_input = f"{inputs_hash}:variant:{variant_idx}"
+                seed_hex = sha256_bytes(seed_input.encode("utf-8"))
+                # Take first 8 chars of hex as integer seed
+                seed = int(seed_hex[:8], 16)
+                seeds_used[variant_idx] = seed_hex
             else:
-                current.append(ln)
-        if current:
-            cap = "\n".join(current).strip()
-            if cap:
-                captions.append(IGCaption(caption=cap, hashtags=[]))
+                seed = None
+                
+            # Generate with optional seed
+            gen_spec_dict = gen_spec.model_dump()
+            if seed is not None:
+                gen_spec_dict["seed"] = seed
+                
+            raw = generate_text(prompt=prompt, generation_spec=gen_spec_dict)
+            captions = _parse_captions(raw)
+            
+            # Enforce count (truncate/pad)
+            captions = captions[: brief.ig.caption_count]
+            while len(captions) < brief.ig.caption_count:
+                captions.append(IGCaption(caption="", hashtags=[]))
+            
+            pkg = IGCopyPackage(
+                job_id=brief.job_id,
+                brand=brief.brand,
+                captions=captions,
+            )
+            variants.append({
+                "variant_index": variant_idx,
+                "seed": seed_hex if seed is not None else None,
+                "captions": [c.model_dump() for c in pkg.captions],
+            })
 
-        # enforce count (truncate/pad)
-        captions = captions[: brief.ig.caption_count]
-        while len(captions) < brief.ig.caption_count:
-            captions.append(IGCaption(caption="", hashtags=[]))
+        if span_gen is not None:
+            span_gen.end(output={"variants_count": len(variants)})
 
-        pkg = IGCopyPackage(
-            job_id=brief.job_id,
-            brand=brief.brand,
-            captions=captions,
-        )
+        # Record seed metadata in manifest if variants mode
+        if brief.generation_mode == "variants" and seeds_used:
+            manifest.generation_metadata = {
+                "generation_mode": brief.generation_mode,
+                "variant_count": num_variants,
+                "seeds": seeds_used,
+            }
+        else:
+            manifest.generation_metadata = {
+                "generation_mode": brief.generation_mode,
+                "variant_count": num_variants,
+            }
 
-        # Render markdown artifact
+        # Write outputs based on generation mode
+        # Primary variant is always index 0
+        primary_variant = variants[0]
+        
+        # Mode A (single) & Mode B (variants): write markdown with primary variant for backward compatibility
         md_lines: List[str] = [f"# Instagram Captions ({brief.brand})", f"- job_id: {brief.job_id}", f"- run_id: {run_id}", ""]
-        for i, c in enumerate(pkg.captions, 1):
-            md_lines.append(f"## Caption {i}")
-            md_lines.append(c.caption.strip())
+        
+        if brief.generation_mode == "variants":
+            md_lines.append(f"- generation_mode: variants")
+            md_lines.append(f"- total_variants: {num_variants}")
             md_lines.append("")
+        
+        for i, cap_dict in enumerate(primary_variant["captions"], 1):
+            md_lines.append(f"## Caption {i}")
+            md_lines.append(cap_dict["caption"].strip())
+            md_lines.append("")
+        
         out_md = "\n".join(md_lines).strip() + "\n"
-
         out_path = temp_dir / "outputs" / "instagram_captions.md"
         write_text(out_path, out_md)
-
+        
         # Record artifact hashes
         out_hash = sha256_bytes(out_md.encode("utf-8"))
         manifest.artifacts["outputs/instagram_captions.md"] = {"sha256": out_hash, "bytes": len(out_md.encode('utf-8'))}
+        
+        # Mode B (variants): write individual variant files
+        if brief.generation_mode == "variants" and num_variants > 1:
+            variants_dir = temp_dir / "outputs" / "variants"
+            ensure_dir(variants_dir)
+            
+            for variant_data in variants:
+                var_idx = variant_data["variant_index"]
+                var_lines: List[str] = [f"# Variant {var_idx + 1}", ""]
+                for i, cap_dict in enumerate(variant_data["captions"], 1):
+                    var_lines.append(f"## Caption {i}")
+                    var_lines.append(cap_dict["caption"].strip())
+                    var_lines.append("")
+                var_md = "\n".join(var_lines).strip() + "\n"
+                
+                var_path = variants_dir / f"{var_idx + 1:02d}.md"
+                write_text(var_path, var_md)
+                var_hash = sha256_bytes(var_md.encode("utf-8"))
+                manifest.artifacts[f"outputs/variants/{var_idx + 1:02d}.md"] = {"sha256": var_hash, "bytes": len(var_md.encode('utf-8'))}
+            
+            # Write variants.json with full data
+            variants_json = json.dumps(variants, indent=2, ensure_ascii=False)
+            variants_json_path = variants_dir / "variants.json"
+            write_text(variants_json_path, variants_json)
+            var_json_hash = sha256_bytes(variants_json.encode("utf-8"))
+            manifest.artifacts["outputs/variants/variants.json"] = {"sha256": var_json_hash, "bytes": len(variants_json.encode('utf-8'))}
+        
+        # Mode C (format): write additional output formats
+        if brief.generation_mode == "format":
+            primary_captions = [c["caption"] for c in primary_variant["captions"]]
+            
+            if "json" in brief.output_formats:
+                json_data = {
+                    "job_id": brief.job_id,
+                    "brand": brief.brand,
+                    "captions": primary_captions,
+                }
+                json_text = json.dumps(json_data, indent=2, ensure_ascii=False)
+                json_path = temp_dir / "outputs" / "instagram_captions.json"
+                write_text(json_path, json_text)
+                json_hash = sha256_bytes(json_text.encode("utf-8"))
+                manifest.artifacts["outputs/instagram_captions.json"] = {"sha256": json_hash, "bytes": len(json_text.encode('utf-8'))}
+            
+            if "yaml" in brief.output_formats:
+                yaml_data = {
+                    "job_id": brief.job_id,
+                    "brand": brief.brand,
+                    "captions": primary_captions,
+                }
+                yaml_text = yaml.safe_dump(yaml_data, default_flow_style=False, sort_keys=False)
+                yaml_path = temp_dir / "outputs" / "instagram_captions.yaml"
+                write_text(yaml_path, yaml_text)
+                yaml_hash = sha256_bytes(yaml_text.encode("utf-8"))
+                manifest.artifacts["outputs/instagram_captions.yaml"] = {"sha256": yaml_hash, "bytes": len(yaml_text.encode('utf-8'))}
 
         manifest.status = "succeeded"
         manifest.finished_at = _utc_now()
