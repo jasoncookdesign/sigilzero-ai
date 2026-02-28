@@ -122,7 +122,7 @@ services:
       SALT: ${LANGFUSE_SALT}
       ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
 
-  sigil-api:
+  sigilzeroai-api:
     build: ./app
     container_name: sz_api
     restart: unless-stopped
@@ -141,8 +141,12 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       LANGFUSE_HOST: http://langfuse-web:3000
+    volumes:
+      - ./jobs:/app/jobs:ro
+      - ./corpus:/app/corpus:ro
+      - ./artifacts:/app/artifacts:rw
 
-  sigil-worker:
+  sigilzeroai-worker:
     build: ./app
     container_name: sz_worker
     restart: unless-stopped
@@ -155,6 +159,10 @@ services:
       DATABASE_URL: ${APP_DATABASE_URL}
       REDIS_URL: ${APP_REDIS_URL}
     command: ["sh", "-lc", "rq worker sigilzero"]
+    volumes:
+      - ./jobs:/app/jobs:ro
+      - ./corpus:/app/corpus:ro
+      - ./artifacts:/app/artifacts:rw
 
 volumes:
   postgres_data:

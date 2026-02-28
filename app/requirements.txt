@@ -7,3 +7,4 @@ rq
 pydantic
 langfuse
 openai
+pyyaml

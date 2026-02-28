@@ -1,0 +1,26 @@
+schema_version: "1.0.0"
+job_id: "ig-test-001"
+job_type: "instagram_copy"
+brand: "SIGIL.ZERO"
+
+artist: "Dyson Hope"
+title: "Edge of the Night"
+tone_tags:
+  - "hypnotic"
+  - "occult-tech"
+  - "confident"
+  - "minimal"
+
+ig:
+  caption_count: 5
+  hashtag_count: 12
+  max_caption_chars: 800
+  include_cta: true
+  include_emojis: false
+
+blocks:
+  - name: "post_context"
+    kind: "markdown"
+    content: |
+      New single out now. Peak-time progressive tech house with dirty electro edge.
+      Mood: midnight city, neon ritual, afterhours signal.

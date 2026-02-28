@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "run_id": "2ef4a8ad-8b31-4976-b4f2-40039658fcce",
+  "job_ref": "jobs/ig-test-001/brief.yaml",
+  "job_type": "instagram_copy",
+  "started_at": "2026-02-28T17:40:08.910880+00:00",
+  "finished_at": "2026-02-28T17:40:08.914064+00:00",
+  "status": "failed",
+  "brief_hash": "sha256:cd1923a7f46fcff2cdeb039da0ad70de54287cc01ac8cc303fa91d41ba9411b7",
+  "context_spec_hash": "sha256:a3d4dfe8fe5e2a59ca605663196a7e68377e86248b84a884afe3702042c32a6e",
+  "context_content_hash": "sha256:132b17f139baa42aa171909a36a1cf1ae75fb477bd24950c3d1e1d2e664263ab",
+  "generation_hash": null,
+  "langfuse_trace_id": null,
+  "artifacts": {},
+  "meta": {},
+  "error": "FileNotFoundError: Template not found at /app/prompts/instagram_copy/v1.0.0/template.md"
+}
