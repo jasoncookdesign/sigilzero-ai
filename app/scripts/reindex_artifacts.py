@@ -49,14 +49,27 @@ def _discover_run_dirs(repo_root: Path) -> List[Tuple[Path, str]]:
     return run_dirs
 
 
-def _discover_manifests(repo_root: Path) -> Tuple[List[Tuple[Path, str]], int, int]:
+def _discover_manifests(repo_root: Path) -> Tuple[List[Tuple[Path, str]], int, int, int]:
     run_dirs = _discover_run_dirs(repo_root)
 
     valid_candidates: List[Tuple[Path, str]] = []
     missing_manifest = 0
     malformed_json = 0
+    orphaned_symlinks_detected = 0
 
     for run_dir, source in run_dirs:
+        # Check if this is an orphaned symlink (broken legacy alias)
+        if run_dir.is_symlink() and not run_dir.exists():
+            orphaned_symlinks_detected += 1
+            print(f"WARN orphaned symlink: {run_dir}")
+            # Attempt to clean it up
+            try:
+                run_dir.unlink()
+                print(f"  → cleaned up broken symlink")
+            except Exception as e:
+                print(f"  → failed to clean: {e}")
+            continue
+        
         manifest_path = run_dir / "manifest.json"
         if not manifest_path.exists():
             missing_manifest += 1
@@ -70,7 +83,7 @@ def _discover_manifests(repo_root: Path) -> Tuple[List[Tuple[Path, str]], int, i
             continue
         valid_candidates.append((manifest_path, source))
 
-    return valid_candidates, missing_manifest, malformed_json
+    return valid_candidates, missing_manifest, malformed_json, orphaned_symlinks_detected
 
 
 def _choose_preferred_manifest(
@@ -229,7 +242,7 @@ def _load_manifest(path: Path) -> Dict[str, Any]:
 
 
 def reindex(repo_root: Path, verify: bool = False) -> int:
-    candidates, missing_manifest_count, malformed_json_count = _discover_manifests(repo_root)
+    candidates, missing_manifest_count, malformed_json_count, orphaned_symlinks_count = _discover_manifests(repo_root)
 
     deduped: Dict[Tuple[str, str], Tuple[Path, str]] = {}
     skipped_missing_fields = 0
@@ -250,7 +263,7 @@ def reindex(repo_root: Path, verify: bool = False) -> int:
     print(
         f"Discovered manifests: {len(candidates)}, unique runs: {len(deduped)}, "
         f"missing_manifest: {missing_manifest_count}, malformed_json: {malformed_json_count}, "
-        f"missing_required_fields: {skipped_missing_fields}"
+        f"missing_required_fields: {skipped_missing_fields}, orphaned_symlinks_detected: {orphaned_symlinks_count}"
     )
 
     with connect() as conn:
@@ -330,11 +343,11 @@ def reindex(repo_root: Path, verify: bool = False) -> int:
     report = (
         f"Indexed: {indexed}, Skipped: {skipped}, Verify failures: {verify_failures if verify else 0}, "
         f"Missing manifests: {missing_manifest_count}, Malformed JSON: {malformed_json_count}, "
-        f"Missing required fields: {skipped_missing_fields}"
+        f"Missing required fields: {skipped_missing_fields}, Orphaned symlinks detected: {orphaned_symlinks_count}"
     )
     print(report)
 
-    if verify and (verify_failures > 0 or malformed_json_count > 0 or skipped_missing_fields > 0):
+    if verify and (verify_failures > 0 or malformed_json_count > 0 or skipped_missing_fields > 0 or orphaned_symlinks_count > 0):
         return 1
 
     return 0

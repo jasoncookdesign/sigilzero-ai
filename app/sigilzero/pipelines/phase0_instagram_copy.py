@@ -17,6 +17,7 @@ from sigilzero.core.hashing import sha256_bytes, sha256_json, compute_inputs_has
 from sigilzero.core.langfuse_client import get_langfuse
 from sigilzero.core.model import generate_text
 from sigilzero.core.prompting import load_prompt_template
+from sigilzero.core.retrieval import retrieve_corpus_documents
 from sigilzero.core.schemas import (
     BriefSpec,
     ContextSpec,
@@ -130,21 +131,76 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
     # These snapshots are the source of truth for inputs_hash computation
     
     # 1. Brief snapshot
-    brief_resolved = brief.model_dump(exclude={"brief_hash", "repo_commit"})
+    # BACKWARD COMPATIBILITY + AUDIT FIDELITY: Exclude Stage 5 & 6 fields ONLY if:
+    # - They're at default values AND
+    # - They were NOT explicitly present in the source brief
+    # This preserves audit intent (explicit defaults are recorded) while maintaining 
+    # backward compatibility with pre-Stage briefs.
+    exclude_fields = {"brief_hash", "repo_commit"}
+    
+    # Stage 5: Exclude generation mode fields only if not explicitly set AND at defaults
+    if ("generation_mode" not in brief_data and 
+        brief.generation_mode == "single" and 
+        brief.caption_variants == 1 and 
+        brief.output_formats == ["md"]):
+        exclude_fields.update({"generation_mode", "caption_variants", "output_formats"})
+    
+    # Stage 6: Exclude retrieval fields only if not explicitly set AND in glob mode
+    if ("context_mode" not in brief_data and 
+        brief.context_mode == "glob"):
+        exclude_fields.update({"context_mode", "context_query", "retrieval_top_k", "retrieval_method"})
+    
+    brief_resolved = brief.model_dump(exclude=exclude_fields)
     write_json(temp_dir / "inputs" / "brief.resolved.json", brief_resolved)
     brief_snapshot_bytes = (temp_dir / "inputs" / "brief.resolved.json").read_bytes()
     brief_snapshot_hash = sha256_bytes(brief_snapshot_bytes)
     
-    # 2. Context spec and content
-    context_spec = ContextSpec(
-        job_ref=job_ref,
-        job_type=brief.job_type,
-        brand=brief.brand,
-        selectors=[
-            ContextSelector(root="corpus", include_globs=["identity/*.md", "strategy/*.md", "artifacts/*.md"]),
-        ],
-    )
-    context_content, context_content_hash = _materialize_context(repo_root, context_spec)
+    # 2. Context spec and content (Stage 6: supports glob and retrieve modes)
+    if brief.context_mode == "retrieve":
+        # Stage 6: Retrieval-based context loading
+        if not brief.context_query:
+            raise ValueError("context_mode='retrieve' requires context_query to be set")
+        
+        selected_items, retrieval_config = retrieve_corpus_documents(
+            repo_root=repo_root,
+            query=brief.context_query,
+            top_k=brief.retrieval_top_k,
+            roots=["corpus"],
+            include_globs=["**/*.md", "**/*.txt"],
+        )
+        
+        # Materialize content from selected items
+        chunks: List[str] = []
+        for item in selected_items:
+            file_path = Path(repo_root) / item["path"]
+            if file_path.exists():
+                content = file_path.read_text(encoding="utf-8", errors="replace")
+                chunks.append(f"\\n\\n# FILE: {item['path']}\\n{content}")
+        
+        context_content = "".join(chunks).strip()
+        context_content_hash = sha256_bytes(context_content.encode("utf-8"))
+        
+        context_spec = ContextSpec(
+            job_ref=job_ref,
+            job_type=brief.job_type,
+            brand=brief.brand,
+            strategy="retrieve",
+            query=brief.context_query,
+            retrieval_config=retrieval_config,
+            selected_items=selected_items,
+        )
+    else:
+        # Legacy glob-based context loading (default)
+        context_spec = ContextSpec(
+            job_ref=job_ref,
+            job_type=brief.job_type,
+            brand=brief.brand,
+            strategy="glob",
+            selectors=[
+                ContextSelector(root="corpus", include_globs=["identity/*.md", "strategy/*.md", "artifacts/*.md"]),
+            ],
+        )
+        context_content, context_content_hash = _materialize_context(repo_root, context_spec)
     
     # Write context snapshot
     context_resolved = {

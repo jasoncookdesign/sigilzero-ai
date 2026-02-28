@@ -50,6 +50,14 @@ class BriefSpec(BaseModel):
     caption_variants: int = Field(default=1, ge=1, le=20)  # For variants mode
     output_formats: List[Literal["md", "json", "yaml"]] = Field(default_factory=lambda: ["md"])  # For format mode
 
+    # Context retrieval (Stage 6): query-aware corpus selection
+    # glob: load files matching globs (default/legacy)
+    # retrieve: deterministic keyword retrieval based on query
+    context_mode: Literal["glob", "retrieve"] = Field(default="glob")
+    context_query: Optional[str] = None  # Query string for retrieve mode
+    retrieval_top_k: int = Field(default=10, ge=1, le=100)  # Max items to retrieve
+    retrieval_method: Literal["keyword"] = Field(default="keyword")  # Only keyword for Stage 6A
+
     # Input blocks (e.g. "post_context", "notes", etc.)
     blocks: List[BriefBlock] = Field(default_factory=list)
 
@@ -99,14 +107,22 @@ class ContextSpec(BaseModel):
     """
     Describes how to build a context pack for an execution.
     Job-centric for Phase 0; avoids release_ref.
+    
+    Stage 6: Supports both glob-based and retrieval-based context loading.
     """
     schema_version: str = Field(default="1.0.0")
     job_ref: Optional[str] = None
     job_type: Optional[str] = None
     brand: Optional[str] = None
     
-    # Selectors for including files
+    # Selectors for including files (glob mode)
     selectors: List[ContextSelector] = Field(default_factory=list)
+    
+    # Stage 6: Retrieval mode configuration
+    strategy: Literal["glob", "retrieve"] = Field(default="glob")
+    query: Optional[str] = None  # Query string for retrieve strategy
+    retrieval_config: Optional[Dict[str, Any]] = None  # All parameters affecting retrieval
+    selected_items: List[Dict[str, Any]] = Field(default_factory=list)  # Ordered list of selected items
     
     # Optional context spec metadata
     context_spec_hash: Optional[str] = None
