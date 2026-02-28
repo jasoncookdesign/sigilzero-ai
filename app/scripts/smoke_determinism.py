@@ -22,21 +22,34 @@ from sigilzero.pipelines.phase0_instagram_copy import execute_instagram_copy_pip
 from sigilzero.core.hashing import sha256_bytes, compute_inputs_hash
 
 
-def cleanup_test_artifacts(repo_root: str, run_ids: list[str]) -> None:
+def cleanup_test_artifacts(repo_root: str, run_ids: list[str], job_id: str | None = None) -> None:
     """Clean up test run directories.
     
     Note: artifacts/runs/.tmp directory is preserved but its contents are cleaned.
     This maintains the invariant that ".tmp exists but is empty after success".
     """
-    runs_dir = Path(repo_root) / "artifacts" / "runs"
+    artifacts_root = Path(repo_root) / "artifacts"
+    runs_dir = artifacts_root / "runs"
+    job_root = artifacts_root / job_id if job_id else None
+
     for run_id in run_ids:
-        run_dir = runs_dir / run_id
-        if run_dir.exists():
-            shutil.rmtree(run_dir)
+        # Canonical location: artifacts/<job_id>/<run_id>
+        if job_root is not None:
+            canonical_run_dir = job_root / run_id
+            if canonical_run_dir.exists():
+                shutil.rmtree(canonical_run_dir)
+
+        # Legacy compatibility location: artifacts/runs/<run_id>
+        legacy_run_dir = runs_dir / run_id
+        if legacy_run_dir.is_symlink() or legacy_run_dir.is_file():
+            legacy_run_dir.unlink()
+        elif legacy_run_dir.exists():
+            shutil.rmtree(legacy_run_dir)
     
     # Clean .tmp contents but preserve directory
-    tmp_dir = runs_dir / ".tmp"
-    if tmp_dir.exists():
+    for tmp_dir in [runs_dir / ".tmp", (job_root / ".tmp") if job_root else None]:
+        if tmp_dir is None or not tmp_dir.exists():
+            continue
         for item in tmp_dir.iterdir():
             if item.is_dir():
                 shutil.rmtree(item)
@@ -44,20 +57,22 @@ def cleanup_test_artifacts(repo_root: str, run_ids: list[str]) -> None:
                 item.unlink()
 
 
-def validate_no_temp_dirs(repo_root: str) -> bool:
+def validate_no_temp_dirs(repo_root: str, job_id: str) -> bool:
     """Ensure no orphaned temp directories exist."""
-    runs_dir = Path(repo_root) / "artifacts" / "runs"
-    
-    # Check for .tmp directory
-    tmp_dir = runs_dir / ".tmp"
-    if tmp_dir.exists():
-        temp_contents = list(tmp_dir.iterdir())
-        if temp_contents:
-            print(f"✗ Found orphaned temp directories in {tmp_dir}: {temp_contents}")
-            return False
+    artifacts_root = Path(repo_root) / "artifacts"
+    runs_dir = artifacts_root / "runs"
+    job_root = artifacts_root / job_id
+
+    # Check both legacy and canonical .tmp directories
+    for tmp_dir in [runs_dir / ".tmp", job_root / ".tmp"]:
+        if tmp_dir.exists():
+            temp_contents = [p for p in tmp_dir.iterdir() if p.name.startswith("tmp-")]
+            if temp_contents:
+                print(f"✗ Found orphaned temp directories in {tmp_dir}: {temp_contents}")
+                return False
     
     # Check for old-style staging dirs (shouldn't exist with new code)
-    staging_dirs = [d for d in runs_dir.iterdir() if d.name.startswith("staging-")]
+    staging_dirs = [d for d in runs_dir.iterdir() if d.name.startswith("staging-")] if runs_dir.exists() else []
     if staging_dirs:
         print(f"✗ Found orphaned staging directories: {staging_dirs}")
         return False
@@ -104,6 +119,7 @@ def run_smoke_tests():
     
     # Track run_ids for cleanup
     cleanup_ids = []
+    cleanup_job_id: str | None = None
     
     try:
         # Test 1: First execution
@@ -118,6 +134,20 @@ def run_smoke_tests():
         manifest_path1 = run_dir1 / "manifest.json"
         with manifest_path1.open("r") as f:
             manifest1 = json.load(f)
+
+        cleanup_job_id = manifest1.get("job_id")
+        if not cleanup_job_id:
+            print("✗ Missing job_id in manifest")
+            return False
+
+        # Validate canonical artifact layout: artifacts/<job_id>/<run_id>
+        expected_run_dir = Path(repo_root) / "artifacts" / cleanup_job_id / run_id1
+        if run_dir1.resolve() != expected_run_dir.resolve():
+            print(f"✗ Run directory layout mismatch")
+            print(f"  Expected: {expected_run_dir}")
+            print(f"  Actual:   {run_dir1}")
+            return False
+        print(f"✓ Canonical artifact layout verified: artifacts/{cleanup_job_id}/{run_id1}")
         
         inputs_hash1 = manifest1.get("inputs_hash")
         if not inputs_hash1:
@@ -223,13 +253,13 @@ def run_smoke_tests():
         
         # Test 7: Validate no orphaned temp dirs
         print("\n[Test 7] Validate no orphaned temp directories")
-        if not validate_no_temp_dirs(repo_root):
+        if not validate_no_temp_dirs(repo_root, cleanup_job_id):
             return False
         print("✓ No orphaned temp or staging directories")
         
         # Test 8: Validate only ONE canonical run directory exists
         print("\n[Test 8] Validate single canonical run directory")
-        runs_dir = Path(repo_root) / "artifacts" / "runs"
+        runs_dir = Path(repo_root) / "artifacts" / cleanup_job_id
         
         # Determine which run_id should exist based on inputs_hash
         base_run_id = run_id1.split("-")[0]  # Get base (without suffix)
@@ -294,7 +324,7 @@ def run_smoke_tests():
     finally:
         # Cleanup test artifacts
         print(f"\n[Cleanup] Removing test run directories: {cleanup_ids}")
-        cleanup_test_artifacts(repo_root, cleanup_ids)
+        cleanup_test_artifacts(repo_root, cleanup_ids, cleanup_job_id)
 
 
 if __name__ == "__main__":

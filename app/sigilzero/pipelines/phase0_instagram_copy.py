@@ -99,8 +99,10 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
     queue_job_id = params.get("queue_job_id")
     
     # Phase 1.0: Create temp directory for atomic run creation
-    # Use .tmp/ subdirectory to avoid polluting runs/ listing
-    tmp_base = Path(repo_root) / "artifacts" / "runs" / ".tmp"
+    # Canonical layout: artifacts/<job_id>/<run_id>/...
+    # Use per-job .tmp/ subdirectory to avoid polluting run listings.
+    job_root = Path(repo_root) / "artifacts" / brief.job_id
+    tmp_base = job_root / ".tmp"
     ensure_dir(tmp_base)
     temp_id = f"tmp-{uuid.uuid4().hex[:16]}"
     temp_dir = tmp_base / temp_id
@@ -201,7 +203,10 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
     # - Different inputs => different run_id (deterministic collision resolution)
     # - No orphaned staging dirs (temp_dir cleaned up in finally)
     
-    runs_root = Path(repo_root) / "artifacts" / "runs"
+    runs_root = job_root
+    legacy_runs_root = Path(repo_root) / "artifacts" / "runs"
+    ensure_dir(runs_root)
+    ensure_dir(legacy_runs_root)
     run_id = None
     run_dir = None
     
@@ -217,50 +222,91 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
         except Exception:
             return None
     
-    # Check base run_id
-    base_dir = runs_root / base_run_id
-    if not base_dir.exists():
-        # No collision, use base run_id
+    def _candidate_dirs(candidate_run_id: str) -> List[Path]:
+        dirs: List[Path] = []
+        canonical = runs_root / candidate_run_id
+        legacy = legacy_runs_root / candidate_run_id
+        if canonical.exists():
+            dirs.append(canonical)
+        if legacy.exists() and legacy not in dirs:
+            dirs.append(legacy)
+        return dirs
+
+    def _ensure_legacy_symlink(candidate_run_id: str) -> None:
+        legacy_path = legacy_runs_root / candidate_run_id
+        if legacy_path.exists():
+            return
+        try:
+            target_rel = Path("..") / brief.job_id / candidate_run_id
+            legacy_path.symlink_to(target_rel)
+        except OSError:
+            pass
+
+    def _promote_legacy_to_canonical(candidate_run_id: str, existing_path: Path) -> Path:
+        canonical_path = runs_root / candidate_run_id
+        legacy_path = legacy_runs_root / candidate_run_id
+
+        # Already canonical
+        if existing_path == canonical_path:
+            return canonical_path
+
+        # If canonical exists, keep using canonical
+        if canonical_path.exists():
+            return canonical_path
+
+        # Promote legacy directory to canonical layout
+        if legacy_path.exists() and not legacy_path.is_symlink():
+            legacy_path.rename(canonical_path)
+            _ensure_legacy_symlink(candidate_run_id)
+            return canonical_path
+
+        # If legacy is symlink, rely on canonical target if available
+        if legacy_path.is_symlink() and canonical_path.exists():
+            return canonical_path
+
+        return existing_path
+
+    # Check base run_id across canonical + legacy locations
+    base_candidates = _candidate_dirs(base_run_id)
+    if not base_candidates:
+        # No collision, use canonical base run_id
         run_id = base_run_id
-        run_dir = base_dir
+        run_dir = runs_root / base_run_id
     else:
-        # Collision: check if idempotent replay
-        existing_hash = _read_manifest_inputs_hash(base_dir)
-        if existing_hash == inputs_hash:
-            # IDEMPOTENT REPLAY: same inputs, return existing run
-            run_id = base_run_id
-            run_dir = base_dir
-            # Clean up temp directory since we're reusing existing run
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir)
-            return {"run_id": run_id, "artifact_dir": str(run_dir), "idempotent_replay": True}
-        
-        # Different inputs_hash: scan for deterministic suffix
+        # Collision: check if idempotent replay in any known location
+        for candidate in base_candidates:
+            existing_hash = _read_manifest_inputs_hash(candidate)
+            if existing_hash == inputs_hash:
+                run_id = base_run_id
+                run_dir = _promote_legacy_to_canonical(base_run_id, candidate)
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir)
+                return {"run_id": run_id, "artifact_dir": str(run_dir), "idempotent_replay": True}
+
+        # Different inputs_hash: scan deterministic suffixes across canonical + legacy
         suffix = 2
         while True:
             suffixed_run_id = f"{base_run_id}-{suffix}"
-            suffixed_dir = runs_root / suffixed_run_id
-            if not suffixed_dir.exists():
-                # Found available suffix
+            suffixed_candidates = _candidate_dirs(suffixed_run_id)
+            if not suffixed_candidates:
+                # Found next available deterministic suffix in canonical location
                 run_id = suffixed_run_id
-                run_dir = suffixed_dir
+                run_dir = runs_root / suffixed_run_id
                 break
-            else:
-                # Check if this suffix matches our inputs_hash (idempotent replay)
-                suffixed_hash = _read_manifest_inputs_hash(suffixed_dir)
+
+            # Check if any suffixed run is idempotent replay
+            for candidate in suffixed_candidates:
+                suffixed_hash = _read_manifest_inputs_hash(candidate)
                 if suffixed_hash == inputs_hash:
-                    # IDEMPOTENT REPLAY with suffix
                     run_id = suffixed_run_id
-                    run_dir = suffixed_dir
-                    # Clean up temp directory
+                    run_dir = _promote_legacy_to_canonical(suffixed_run_id, candidate)
                     if temp_dir.exists():
                         shutil.rmtree(temp_dir)
                     return {"run_id": run_id, "artifact_dir": str(run_dir), "idempotent_replay": True}
-                # Not a match, try next suffix
-                suffix += 1
-                # Safety: prevent infinite loop (shouldn't happen in practice)
-                if suffix > 1000:
-                    raise RuntimeError(f"Exceeded maximum collision suffix for run_id {base_run_id}")
+
+            suffix += 1
+            if suffix > 1000:
+                raise RuntimeError(f"Exceeded maximum collision suffix for run_id {base_run_id}")
     
     # Atomically rename temp_dir to final run_dir
     try:
@@ -271,6 +317,9 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
             shutil.rmtree(temp_dir)
         raise RuntimeError(f"Failed to atomically create run directory {run_dir}: {e}") from e
     
+    # Create legacy compatibility symlink: artifacts/runs/<run_id> -> artifacts/<job_id>/<run_id>
+    _ensure_legacy_symlink(run_id)
+
     # Create input snapshot metadata for manifest
     input_snapshots = {
         "brief": InputSnapshot(

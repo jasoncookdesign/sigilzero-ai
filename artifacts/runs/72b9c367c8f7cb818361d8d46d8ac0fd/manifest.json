@@ -1,0 +1,54 @@
+{
+  "artifacts": {
+    "outputs/instagram_captions.md": {
+      "bytes": 607,
+      "sha256": "sha256:bd5b433bad1f33d91605b354f7394e4163f2ed53f3ff26a31e5950274484d9d1"
+    }
+  },
+  "brief_hash": "sha256:cd1923a7f46fcff2cdeb039da0ad70de54287cc01ac8cc303fa91d41ba9411b7",
+  "context_content_hash": "sha256:132b17f139baa42aa171909a36a1cf1ae75fb477bd24950c3d1e1d2e664263ab",
+  "context_spec_hash": "sha256:a3d4dfe8fe5e2a59ca605663196a7e68377e86248b84a884afe3702042c32a6e",
+  "doctrine": {
+    "doctrine_id": "prompts/instagram_copy",
+    "resolved_at": "2026-02-28T19:36:12.184690+00:00",
+    "resolved_path": "sigilzero/prompts/instagram_copy/v1.0.0/template.md",
+    "sha256": "sha256:e0676cdde02d2949a3339ecae64127216b4dc6bab167dfd0674c91ecdfa230df",
+    "version": "v1.0.0"
+  },
+  "error": null,
+  "finished_at": "2026-02-28T19:36:12.185596+00:00",
+  "generation_hash": "sha256:418b251ebc0243f00c4f5aa79b9d355ae7f1e630bbb8dc52e90fd30acfe77ab6",
+  "input_snapshots": {
+    "brief": {
+      "bytes": 686,
+      "path": "inputs/brief.resolved.json",
+      "sha256": "sha256:ba690fa32feff71e08808eb0a159f8b879fbb0ec77ba300330b2300f24029998"
+    },
+    "context": {
+      "bytes": 21010,
+      "path": "inputs/context.resolved.json",
+      "sha256": "sha256:7e88fb035847bcb7c86d253b13683b2d1a8746c477444a07f0d69486293c5d3d"
+    },
+    "doctrine": {
+      "bytes": 1281,
+      "path": "inputs/doctrine.resolved.json",
+      "sha256": "sha256:56ad734e5d04f8437f57a86961fa2ad80110bab7dca54cb412b2fbe29ddf8a53"
+    },
+    "model_config": {
+      "bytes": 213,
+      "path": "inputs/model_config.json",
+      "sha256": "sha256:c03f661866ae5d34c2da0f0c305e143006ee5f5ef0e3b2e1d3f7509069af40d7"
+    }
+  },
+  "inputs_hash": "sha256:72b9c367c8f7cb818361d8d46d8ac0fdad8057137ad16d5a51645c92747e2918",
+  "job_id": "ig-test-001",
+  "job_ref": "jobs/ig-test-001/brief.yaml",
+  "job_type": "instagram_copy",
+  "langfuse_trace_id": null,
+  "meta": {},
+  "queue_job_id": "1935aa5f-d08a-4a90-89e6-bcc0a53e4c16",
+  "run_id": "72b9c367c8f7cb818361d8d46d8ac0fd",
+  "schema_version": "1.1.0",
+  "started_at": "2026-02-28T19:36:12.185229+00:00",
+  "status": "succeeded"
+}

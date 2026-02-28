@@ -11,6 +11,11 @@ from .core.schemas import BriefSpec
 from .pipelines.phase0_instagram_copy import execute_instagram_copy_pipeline
 
 
+JOB_PIPELINE_REGISTRY = {
+    "instagram_copy": execute_instagram_copy_pipeline,
+}
+
+
 def get_redis() -> Redis:
     return Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
 
@@ -37,10 +42,11 @@ def execute_job(repo_root: str, job_ref: str, params: Optional[Dict[str, Any]] =
         data = yaml.safe_load(f) or {}
     brief = BriefSpec.model_validate(data)
     
-    if brief.job_type == "instagram_copy":
-        return execute_instagram_copy_pipeline(repo_root, job_ref, params=params)
-    
-    raise ValueError(f"Unsupported job_type: {brief.job_type}")
+    pipeline_fn = JOB_PIPELINE_REGISTRY.get(brief.job_type)
+    if pipeline_fn is None:
+        raise ValueError(f"Unsupported job_type: {brief.job_type}")
+
+    return pipeline_fn(repo_root, job_ref, params=params)
 
 
 def enqueue_job(repo_root: str, job_ref: str, params: Optional[Dict[str, Any]] = None):
