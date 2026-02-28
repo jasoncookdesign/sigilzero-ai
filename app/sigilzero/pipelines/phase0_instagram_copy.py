@@ -471,15 +471,21 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
         variants: List[Dict[str, Any]] = []
         seeds_used = {}
         
-        num_variants = 1 if brief.generation_mode == "single" else brief.caption_variants
+        # Determine variant count based on mode
+        if brief.generation_mode in ("single", "format"):
+            num_variants = 1
+        else:  # variants mode
+            num_variants = brief.caption_variants
         
         for variant_idx in range(num_variants):
             # Compute deterministic seed for this variant
-            if brief.generation_mode == "variants" and num_variants > 1:
+            if brief.generation_mode == "variants":
                 seed_input = f"{inputs_hash}:variant:{variant_idx}"
                 seed_hex = sha256_bytes(seed_input.encode("utf-8"))
+                # Extract just the hex part (strip "sha256:" prefix)
+                hex_only = seed_hex.replace("sha256:", "")
                 # Take first 8 chars of hex as integer seed
-                seed = int(seed_hex[:8], 16)
+                seed = int(hex_only[:8], 16)
                 seeds_used[variant_idx] = seed_hex
             else:
                 seed = None
@@ -512,10 +518,11 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
             span_gen.end(output={"variants_count": len(variants)})
 
         # Record seed metadata in manifest if variants mode
-        if brief.generation_mode == "variants" and seeds_used:
+        if brief.generation_mode == "variants":
             manifest.generation_metadata = {
                 "generation_mode": brief.generation_mode,
                 "variant_count": num_variants,
+                "seed_strategy": "sha256(inputs_hash + ':variant:' + idx)",
                 "seeds": seeds_used,
             }
         else:
