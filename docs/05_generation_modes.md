@@ -203,9 +203,10 @@ artifacts/<job_id>/<run_id>/
 - No database writes are required for functionality
 
 ### Deterministic Reproducibility
-**Status**: ✅ GUARANTEED
-- Given artifact directory + manifest, can reproduce outputs
-- Seeds stored in manifest → deterministic variant regeneration if needed
+**Status**: ✅ BEST-EFFORT (Seed-dependent)
+- Given artifact directory + manifest, inputs can be replayed identically
+- Seeds stored in manifest with derivation strategy documented
+- Output reproducibility depends on provider honoring seed and model stability
 - Filesystem is sufficient source of truth; DB is optional index
 
 ## Definition of Done - Stage 5
@@ -217,8 +218,8 @@ artifacts/<job_id>/<run_id>/
 
 ✅ **Determinism Preserved**
 - Variant generation uses deterministic seeds from inputs_hash
-- Seeds recorded in manifest
-- Same inputs → identical outputs (deterministic model)
+- Seeds recorded in manifest with seed_strategy documented
+- Deterministic seed derivation is guaranteed; byte-identical outputs depend on provider honoring seed and model stability
 
 ✅ **API Compatibility**
 - POST /jobs/run unchanged

@@ -39,6 +39,33 @@ def cleanup_test_artifacts(repo_root: str, run_ids: List[str], job_id: str | Non
             shutil.rmtree(legacy_run_dir)
 
 
+def create_test_brief(repo_root: str, job_id: str, overrides: Dict[str, Any]) -> str:
+    """Create a temporary brief file with test overrides."""
+    # Load base brief
+    base_path = Path(repo_root) / "jobs" / "ig-test-001" / "brief.yaml"
+    base_brief = yaml.safe_load(base_path.read_text())
+    
+    # Apply overrides
+    test_brief = {**base_brief, **overrides, "job_id": job_id}
+    
+    # Write to temp location in /tmp (writable in container)
+    test_jobs_dir = Path("/tmp") / "test-jobs" / job_id
+    test_jobs_dir.mkdir(parents=True, exist_ok=True)
+    test_brief_path = test_jobs_dir / "brief.yaml"
+    
+    with open(test_brief_path, "w") as f:
+        yaml.dump(test_brief, f, default_flow_style=False, sort_keys=False)
+    
+    return str(test_brief_path)
+
+
+def cleanup_test_brief(repo_root: str, job_id: str) -> None:
+    """Remove temporary brief directory."""
+    test_jobs_dir = Path("/tmp") / "test-jobs" / job_id
+    if test_jobs_dir.exists():
+        shutil.rmtree(test_jobs_dir)
+
+
 def test_mode_a_single():
     """Mode A: Single output (backward compatibility)"""
     test_name = "test_mode_a_single"
@@ -46,25 +73,17 @@ def test_mode_a_single():
     job_id = "mode-test-001"
     
     try:
-        # Load base brief
-        brief_path = Path(repo_root) / "jobs" / "ig-test-001" / "brief.yaml"
-        if not brief_path.exists():
-            print(f"SKIP {test_name}: ig-test-001 brief not found")
-            return True
-        
-        # Inject simple brief override (mode A is default)
-        override_brief = {
-            "job_id": job_id,
-            "generation_mode": "single",
-        }
+        # Create test brief with Mode A
+        job_ref = create_test_brief(repo_root, job_id, {
+            "generation_mode": "single"
+        })
         
         # Execute twice to test determinism
         results = []
         for i in range(2):
             result = execute_instagram_copy_pipeline(
                 repo_root=repo_root,
-                job_ref="jobs/ig-test-001/brief.yaml",
-                brief_overrides=override_brief,
+                job_ref=job_ref,
             )
             results.append(result)
         
@@ -74,6 +93,7 @@ def test_mode_a_single():
         
         if run_id_1 != run_id_2:
             print(f"FAIL {test_name}: Mode A should be deterministic (run 1: {run_id_1} vs run 2: {run_id_2})")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id_1, run_id_2], job_id)
             return False
         
@@ -81,21 +101,25 @@ def test_mode_a_single():
         manifest_path = Path(repo_root) / "artifacts" / job_id / run_id_1 / "manifest.json"
         if not manifest_path.exists():
             print(f"FAIL {test_name}: Manifest not found at {manifest_path}")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id_1], job_id)
             return False
         
         manifest = json.loads(manifest_path.read_text())
         if "outputs/instagram_captions.md" not in manifest.get("artifacts", {}):
             print(f"FAIL {test_name}: outputs/instagram_captions.md not in artifacts")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id_1], job_id)
             return False
         
         print(f"PASS {test_name}")
+        cleanup_test_brief(repo_root, job_id)
         cleanup_test_artifacts(repo_root, [run_id_1], job_id)
         return True
     
     except Exception as e:
         print(f"FAIL {test_name}: {e}")
+        cleanup_test_brief(repo_root, job_id)
         return False
 
 
@@ -106,16 +130,11 @@ def test_mode_b_variants():
     job_id = "mode-test-002"
     
     try:
-        brief_path = Path(repo_root) / "jobs" / "ig-test-001" / "brief.yaml"
-        if not brief_path.exists():
-            print(f"SKIP {test_name}: ig-test-001 brief not found")
-            return True
-        
-        override_brief = {
-            "job_id": job_id,
+        # Create test brief with Mode B
+        job_ref = create_test_brief(repo_root, job_id, {
             "generation_mode": "variants",
             "caption_variants": 3,
-        }
+        })
         
         # Execute twice with same config
         results = []
@@ -123,8 +142,7 @@ def test_mode_b_variants():
         for i in range(2):
             result = execute_instagram_copy_pipeline(
                 repo_root=repo_root,
-                job_ref="jobs/ig-test-001/brief.yaml",
-                brief_overrides=override_brief,
+                job_ref=job_ref,
             )
             results.append(result)
             run_ids.append(result["run_id"])
@@ -132,6 +150,7 @@ def test_mode_b_variants():
         # Both should have same run_id (determinism from inputs_hash)
         if run_ids[0] != run_ids[1]:
             print(f"FAIL {test_name}: Variants should derive same run_id from inputs (run 1: {run_ids[0]} vs run 2: {run_ids[1]})")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, run_ids, job_id)
             return False
         
@@ -145,11 +164,13 @@ def test_mode_b_variants():
         gen_meta = manifest.get("generation_metadata", {})
         if gen_meta.get("generation_mode") != "variants":
             print(f"FAIL {test_name}: generation_mode not set in metadata")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id], job_id)
             return False
         
         if gen_meta.get("variant_count") != 3:
             print(f"FAIL {test_name}: Expected 3 variants, got {gen_meta.get('variant_count')}")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id], job_id)
             return False
         
@@ -157,6 +178,7 @@ def test_mode_b_variants():
         seeds = gen_meta.get("seeds", {})
         if len(seeds) != 3:
             print(f"FAIL {test_name}: Expected 3 seeds, got {len(seeds)}")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id], job_id)
             return False
         
@@ -173,6 +195,7 @@ def test_mode_b_variants():
         for expected_file in expected_files:
             if expected_file not in artifacts:
                 print(f"FAIL {test_name}: Missing {expected_file} in artifacts")
+                cleanup_test_brief(repo_root, job_id)
                 cleanup_test_artifacts(repo_root, [run_id], job_id)
                 return False
         
@@ -181,15 +204,18 @@ def test_mode_b_variants():
         variants_json = json.loads(variants_json_path.read_text())
         if len(variants_json) != 3:
             print(f"FAIL {test_name}: variants.json should have 3 entries, got {len(variants_json)}")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id], job_id)
             return False
         
         print(f"PASS {test_name}")
+        cleanup_test_brief(repo_root, job_id)
         cleanup_test_artifacts(repo_root, [run_id], job_id)
         return True
     
     except Exception as e:
         print(f"FAIL {test_name}: {e}")
+        cleanup_test_brief(repo_root, job_id)
         return False
 
 
@@ -200,21 +226,15 @@ def test_mode_c_format():
     job_id = "mode-test-003"
     
     try:
-        brief_path = Path(repo_root) / "jobs" / "ig-test-001" / "brief.yaml"
-        if not brief_path.exists():
-            print(f"SKIP {test_name}: ig-test-001 brief not found")
-            return True
-        
-        override_brief = {
-            "job_id": job_id,
+        # Create test brief with Mode C
+        job_ref = create_test_brief(repo_root, job_id, {
             "generation_mode": "format",
             "output_formats": ["md", "json", "yaml"],
-        }
+        })
         
         result = execute_instagram_copy_pipeline(
             repo_root=repo_root,
-            job_ref="jobs/ig-test-001/brief.yaml",
-            brief_overrides=override_brief,
+            job_ref=job_ref,
         )
         
         run_id = result["run_id"]
@@ -232,6 +252,7 @@ def test_mode_c_format():
         for expected_file in expected_files:
             if expected_file not in artifacts:
                 print(f"FAIL {test_name}: Missing {expected_file} in artifacts")
+                cleanup_test_brief(repo_root, job_id)
                 cleanup_test_artifacts(repo_root, [run_id], job_id)
                 return False
         
@@ -243,6 +264,7 @@ def test_mode_c_format():
         json_data = json.loads(json_path.read_text())
         if not isinstance(json_data.get("captions"), list):
             print(f"FAIL {test_name}: JSON captions should be a list")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id], job_id)
             return False
         
@@ -251,15 +273,18 @@ def test_mode_c_format():
         yaml_data = yaml.safe_load(yaml_path.read_text())
         if not isinstance(yaml_data.get("captions"), list):
             print(f"FAIL {test_name}: YAML captions should be a list")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id], job_id)
             return False
         
         print(f"PASS {test_name}")
+        cleanup_test_brief(repo_root, job_id)
         cleanup_test_artifacts(repo_root, [run_id], job_id)
         return True
     
     except Exception as e:
         print(f"FAIL {test_name}: {e}")
+        cleanup_test_brief(repo_root, job_id)
         return False
 
 
@@ -270,16 +295,13 @@ def test_backward_compatibility():
     job_id = "mode-test-backcompat"
     
     try:
-        brief_path = Path(repo_root) / "jobs" / "ig-test-001" / "brief.yaml"
-        if not brief_path.exists():
-            print(f"SKIP {test_name}: ig-test-001 brief not found")
-            return True
+        # Create test brief without generation_mode (defaults to single)
+        job_ref = create_test_brief(repo_root, job_id, {})
         
         # Execute with default brief (no generation_mode override = single)
         result = execute_instagram_copy_pipeline(
             repo_root=repo_root,
-            job_ref="jobs/ig-test-001/brief.yaml",
-            brief_overrides={"job_id": job_id},
+            job_ref=job_ref,
         )
         
         run_id = result["run_id"]
@@ -290,6 +312,7 @@ def test_backward_compatibility():
         gen_meta = manifest.get("generation_metadata", {})
         if gen_meta.get("generation_mode") != "single":
             print(f"FAIL {test_name}: Default generation_mode should be 'single'")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id], job_id)
             return False
         
@@ -297,21 +320,25 @@ def test_backward_compatibility():
         artifacts = manifest.get("artifacts", {})
         if "outputs/instagram_captions.md" not in artifacts:
             print(f"FAIL {test_name}: Missing outputs/instagram_captions.md")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id], job_id)
             return False
         
         # Should NOT have variant files
         if any("variants/" in key for key in artifacts.keys()):
             print(f"FAIL {test_name}: Default mode should not create variant files")
+            cleanup_test_brief(repo_root, job_id)
             cleanup_test_artifacts(repo_root, [run_id], job_id)
             return False
         
         print(f"PASS {test_name}")
+        cleanup_test_brief(repo_root, job_id)
         cleanup_test_artifacts(repo_root, [run_id], job_id)
         return True
     
     except Exception as e:
         print(f"FAIL {test_name}: {e}")
+        cleanup_test_brief(repo_root, job_id)
         return False
 
 

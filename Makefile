@@ -21,7 +21,7 @@ smoke_determinism:
 
 smoke_generation_modes:
 	@echo "Running Stage 5 Generation Modes Smoke Tests..."
-	docker exec sz_worker python /app/scripts/smoke_generation_modes.py
+	docker exec sz_worker python /app/scripts/smoke_generation_modes_v2.py
 
 reindex:
 	@echo "Rebuilding DB index from filesystem manifests..."
