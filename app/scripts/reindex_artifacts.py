@@ -110,6 +110,10 @@ def _validate_manifest_integrity(manifest: Dict[str, Any], manifest_path: Path) 
         "model_config": "inputs/model_config.json",
         "doctrine": "inputs/doctrine.resolved.json",
     }
+    manifest_input_snapshots = manifest.get("input_snapshots")
+    if not isinstance(manifest_input_snapshots, dict):
+        errors.append("missing or invalid input_snapshots metadata")
+        manifest_input_snapshots = {}
 
     snapshot_hashes: Dict[str, str] = {}
     for name, rel_path in required_snapshots.items():
@@ -117,14 +121,90 @@ def _validate_manifest_integrity(manifest: Dict[str, Any], manifest_path: Path) 
         if not snapshot_path.exists():
             errors.append(f"missing snapshot: {rel_path}")
             continue
-        snapshot_hashes[name] = sha256_bytes(snapshot_path.read_bytes())
+
+        snapshot_bytes = snapshot_path.read_bytes()
+        snapshot_hash = sha256_bytes(snapshot_bytes)
+        snapshot_hashes[name] = snapshot_hash
+
+        snapshot_meta = manifest_input_snapshots.get(name)
+        if not isinstance(snapshot_meta, dict):
+            errors.append(f"missing input_snapshots.{name} metadata")
+            continue
+        if snapshot_meta.get("path") != rel_path:
+            errors.append(
+                f"input_snapshots.{name}.path mismatch (manifest={snapshot_meta.get('path')}, expected={rel_path})"
+            )
+        if snapshot_meta.get("sha256") != snapshot_hash:
+            errors.append(
+                f"input_snapshots.{name}.sha256 mismatch (manifest={snapshot_meta.get('sha256')}, recomputed={snapshot_hash})"
+            )
+        expected_bytes = len(snapshot_bytes)
+        if snapshot_meta.get("bytes") != expected_bytes:
+            errors.append(
+                f"input_snapshots.{name}.bytes mismatch (manifest={snapshot_meta.get('bytes')}, expected={expected_bytes})"
+            )
+
+    doctrine = manifest.get("doctrine")
+    if not isinstance(doctrine, dict):
+        errors.append("missing doctrine metadata")
+    else:
+        # Load and parse doctrine snapshot to verify governance fields + content hash
+        doctrine_snapshot_path = manifest_path.parent / "inputs" / "doctrine.resolved.json"
+        if not doctrine_snapshot_path.exists():
+            errors.append("doctrine_snapshot_missing")
+        else:
+            try:
+                doctrine_snapshot = json.loads(doctrine_snapshot_path.read_text("utf-8"))
+            except Exception as e:
+                errors.append(f"doctrine_snapshot_malformed: {e}")
+                doctrine_snapshot = {}
+
+            # Validate required schema fields in doctrine snapshot
+            for schema_field in ["doctrine_id", "version", "sha256", "content"]:
+                if schema_field not in doctrine_snapshot:
+                    errors.append(f"doctrine_snapshot_missing_field:{schema_field}")
+
+            # Validate governance fields match manifest.doctrine
+            for field in ["doctrine_id", "version"]:
+                snapshot_val = doctrine_snapshot.get(field)
+                manifest_val = doctrine.get(field)
+                if snapshot_val != manifest_val:
+                    errors.append(
+                        f"doctrine_field_mismatch:{field} (snapshot={snapshot_val}, manifest={manifest_val})"
+                    )
+
+            # Verify doctrine.sha256 is consistent between snapshot and manifest
+            doc_sha256_in_manifest = doctrine.get("sha256")
+            doc_sha256_in_snapshot = doctrine_snapshot.get("sha256")
+            if doc_sha256_in_manifest != doc_sha256_in_snapshot:
+                errors.append(
+                    f"doctrine_field_mismatch:sha256 (snapshot={doc_sha256_in_snapshot}, manifest={doc_sha256_in_manifest})"
+                )
+
+            # Recompute doctrine content hash and verify it matches manifest
+            doctrine_content = doctrine_snapshot.get("content", "")
+            doctrine_content_hash = sha256_bytes(doctrine_content.encode("utf-8"))
+            if doc_sha256_in_manifest and doctrine_content_hash != doc_sha256_in_manifest:
+                errors.append(
+                    f"doctrine_content_hash_mismatch (manifest={doc_sha256_in_manifest}, recomputed={doctrine_content_hash})"
+                )
 
     if len(snapshot_hashes) == len(required_snapshots):
         recomputed_inputs_hash = compute_inputs_hash(snapshot_hashes)
         if recomputed_inputs_hash != inputs_hash:
-            errors.append(
-                f"inputs_hash mismatch (manifest={inputs_hash}, recomputed={recomputed_inputs_hash})"
+            # Check if snapshot or doctrine errors already explain the mismatch
+            has_snapshot_errors = any(
+                "input_snapshots" in err or "missing snapshot" in err or "doctrine" in err
+                for err in errors
             )
+            if has_snapshot_errors:
+                errors.append(
+                    f"inputs_hash mismatch (expected because snapshot bytes changed; manifest={inputs_hash}, recomputed={recomputed_inputs_hash})"
+                )
+            else:
+                errors.append(
+                    f"inputs_hash mismatch (manifest={inputs_hash}, recomputed={recomputed_inputs_hash})"
+                )
 
         base_run_id = derive_run_id(inputs_hash)
         if run_id == base_run_id:
@@ -141,12 +221,6 @@ def _validate_manifest_integrity(manifest: Dict[str, Any], manifest_path: Path) 
             errors.append(f"run_id does not derive from inputs_hash (base={base_run_id}, actual={run_id})")
 
     return errors
-
-    # Dedupe by resolved path so symlinked legacy entries don't double-index
-    unique: Dict[str, Path] = {}
-    for manifest in manifests:
-        unique[str(manifest.resolve())] = manifest.resolve()
-    return sorted(unique.values())
 
 
 def _load_manifest(path: Path) -> Dict[str, Any]:
