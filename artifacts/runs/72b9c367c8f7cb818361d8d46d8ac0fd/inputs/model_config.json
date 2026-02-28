@@ -1,9 +1,0 @@
-{
-  "cache_enabled": true,
-  "model": "gpt-4.1-mini",
-  "provider": "openai",
-  "response_schema": "response_schemas/ig_copy_package",
-  "response_schema_version": "v1.0.0",
-  "temperature": 0.3,
-  "top_p": 1.0
-}

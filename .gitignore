@@ -213,4 +213,10 @@ marimo/_lsp/
 __marimo__/
 
 # Streamlit
+
+# SIGIL.ZERO runtime artifacts (generated at run-time)
+artifacts/runs/
+artifacts/*/.tmp/
+artifacts/*/*/
+!artifacts/_write_test
 .streamlit/secrets.toml
