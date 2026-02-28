@@ -52,7 +52,6 @@ def _resolve_repo_path(repo_root: str, rel_path: str) -> Path:
 
     repo_root_path = Path(repo_root).resolve()
     p = (repo_root_path / rel_path).resolve()
-    failed_exc: Exception | None = None
 
     try:
         p.relative_to(repo_root_path)
@@ -110,7 +109,6 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
 
     # Phase 1: Resolve and validate brief
     brief_path = _resolve_repo_path(repo_root, job_ref)
-    brief_raw = brief_path.read_bytes()
     brief_data = _read_yaml(brief_path)
     brief = BriefSpec.model_validate(brief_data)
     
@@ -509,12 +507,6 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
     finally:
         # Always write manifest
         write_json(temp_dir / "manifest.json", json.loads(manifest.model_dump_json()))
-        # Clean up temp directory if it still exists (shouldn't happen in success path)
-        if temp_dir.exists() and final_run_dir.exists():
-            try:
-                shutil.rmtree(temp_dir)
-            except Exception:
-                pass  # Best effort cleanup
 
     # Atomically rename completed temp run to canonical destination
     try:

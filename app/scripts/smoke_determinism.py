@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import sys
+import difflib
 from pathlib import Path
 from typing import Dict, Any
 
@@ -19,6 +20,7 @@ from typing import Dict, Any
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sigilzero.pipelines.phase0_instagram_copy import execute_instagram_copy_pipeline
+import sigilzero.pipelines.phase0_instagram_copy as pipeline_module
 from sigilzero.core.hashing import sha256_bytes, compute_inputs_hash
 
 
@@ -102,6 +104,19 @@ def validate_canonical_json(snapshot_path: Path) -> bool:
         return False
     
     return True
+
+
+def normalized_manifest_bytes(manifest: dict) -> bytes:
+    """Return deterministic byte representation of manifest excluding volatile runtime fields."""
+    m = dict(manifest)
+    m.pop("started_at", None)
+    m.pop("finished_at", None)
+    m.pop("queue_job_id", None)
+    m.pop("langfuse_trace_id", None)
+    doctrine = dict(m.get("doctrine") or {})
+    doctrine.pop("resolved_at", None)
+    m["doctrine"] = doctrine
+    return (json.dumps(m, sort_keys=True, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
 def run_smoke_tests():
@@ -332,6 +347,20 @@ def run_smoke_tests():
 
         # Test 9: Deterministic collision suffix behavior
         print("\n[Test 9] Validate deterministic collision suffix")
+        # Ensure deterministic baseline: remove any pre-existing suffixed siblings for this base
+        suffix = 2
+        removed_siblings = []
+        while True:
+            sibling_id = f"{run_id1}-{suffix}"
+            sibling_dir = runs_dir / sibling_id
+            if not sibling_dir.exists():
+                break
+            shutil.rmtree(sibling_dir)
+            removed_siblings.append(sibling_id)
+            suffix += 1
+        if removed_siblings:
+            print(f"  Removed pre-existing siblings: {', '.join(removed_siblings)}")
+
         base_manifest_path = runs_dir / run_id1 / "manifest.json"
         original_manifest_bytes = base_manifest_path.read_bytes()
         base_manifest_data = json.loads(original_manifest_bytes.decode("utf-8"))
@@ -345,17 +374,17 @@ def run_smoke_tests():
         run_id3 = result3["run_id"]
         cleanup_ids.append(run_id3)
 
-        if run_id3 == run_id1:
-            print("✗ Collision suffix test failed: expected suffixed run_id")
+        expected_run_id3 = f"{run_id1}-2"
+        if run_id3 != expected_run_id3:
+            print(f"✗ Deterministic suffix mismatch: expected {expected_run_id3}, got {run_id3}")
             return False
-        if not run_id3.startswith(run_id1 + "-"):
-            print(f"✗ Collision suffix run_id format invalid: {run_id3}")
+        expected_artifact_dir = Path(repo_root) / "artifacts" / cleanup_job_id / run_id3
+        if Path(result3["artifact_dir"]).resolve() != expected_artifact_dir.resolve():
+            print("✗ Collision suffix artifact_dir mismatch")
+            print(f"  Expected: {expected_artifact_dir}")
+            print(f"  Actual:   {result3['artifact_dir']}")
             return False
-        suffix = run_id3[len(run_id1) + 1 :]
-        if not suffix.isdigit() or int(suffix) < 2:
-            print(f"✗ Collision suffix must be deterministic integer >=2: {run_id3}")
-            return False
-        print(f"✓ Deterministic collision suffix used: {run_id3}")
+        print(f"✓ Deterministic collision suffix used exactly: {run_id3}")
 
         # Restore base manifest before cleanup to keep state consistent
         base_manifest_path.write_bytes(original_manifest_bytes)
@@ -371,6 +400,101 @@ def run_smoke_tests():
         else:
             print("✗ Neither legacy alias nor canonical manifest exists")
             return False
+
+        # Test 11: Manifest deterministic bytes across two clean runs
+        print("\n[Test 11] Validate manifest byte identity across clean runs")
+        excluded_fields = [
+            "started_at",
+            "finished_at",
+            "queue_job_id",
+            "langfuse_trace_id",
+            "doctrine.resolved_at",
+        ]
+        print(f"  Excluded volatile fields: {', '.join(excluded_fields)}")
+        print("  No other fields are ignored")
+
+        baseline_manifest_bytes = normalized_manifest_bytes(manifest1)
+        cleanup_test_artifacts(repo_root, [run_id1, run_id3], cleanup_job_id)
+
+        clean_result = execute_instagram_copy_pipeline(repo_root, job_ref, params={})
+        clean_run_id = clean_result["run_id"]
+        cleanup_ids.append(clean_run_id)
+
+        clean_manifest_path = Path(clean_result["artifact_dir"]) / "manifest.json"
+        clean_manifest_data = json.loads(clean_manifest_path.read_text(encoding="utf-8"))
+        clean_manifest_bytes = normalized_manifest_bytes(clean_manifest_data)
+        if clean_manifest_bytes != baseline_manifest_bytes:
+            print("✗ Normalized manifest bytes differ across clean runs with identical inputs")
+            baseline_text = baseline_manifest_bytes.decode("utf-8")
+            clean_text = clean_manifest_bytes.decode("utf-8")
+            diff = list(
+                difflib.unified_diff(
+                    baseline_text.splitlines(),
+                    clean_text.splitlines(),
+                    fromfile="baseline_normalized_manifest.json",
+                    tofile="clean_normalized_manifest.json",
+                    lineterm="",
+                )
+            )
+            if diff:
+                print("  Diff (first 30 lines):")
+                for line in diff[:30]:
+                    print(f"    {line}")
+            return False
+        print(f"✓ Normalized manifest bytes identical across clean runs: run_id={clean_run_id}")
+
+        # Test 12: Failure path leaves no tmp-* leftovers and no partial final dirs
+        print("\n[Test 12] Validate atomic failure behavior")
+        # Remove existing run so failure path cannot short-circuit via idempotent replay
+        cleanup_test_artifacts(repo_root, [clean_run_id], cleanup_job_id)
+
+        original_generate_text = pipeline_module.generate_text
+
+        def _raise_generation_failure(*_args, **_kwargs):
+            raise RuntimeError("forced smoke failure")
+
+        pipeline_module.generate_text = _raise_generation_failure
+        failed_run_id = None
+        failed_artifact_dir = None
+        try:
+            execute_instagram_copy_pipeline(repo_root, job_ref, params={})
+            print("✗ Expected forced generation failure, but pipeline succeeded")
+            return False
+        except Exception:
+            # Discover most recent failed run manifest for this job_id
+            job_runs_dir = Path(repo_root) / "artifacts" / cleanup_job_id
+            candidates = sorted(
+                [p for p in job_runs_dir.iterdir() if p.is_dir() and not p.name.startswith(".")],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for candidate in candidates:
+                manifest_path = candidate / "manifest.json"
+                if not manifest_path.exists():
+                    continue
+                data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if data.get("status") == "failed" and "forced smoke failure" in (data.get("error") or ""):
+                    failed_run_id = data.get("run_id")
+                    failed_artifact_dir = candidate
+                    break
+
+            if failed_run_id is None or failed_artifact_dir is None:
+                print("✗ Could not locate failed run manifest for forced failure")
+                return False
+
+            cleanup_ids.append(failed_run_id)
+            # Failed run must still be atomically finalized with manifest
+            if not (failed_artifact_dir / "manifest.json").exists():
+                print("✗ Failed run missing manifest.json")
+                return False
+            print(f"✓ Failed run finalized atomically: {failed_run_id}")
+        finally:
+            pipeline_module.generate_text = original_generate_text
+
+        if not validate_no_temp_dirs(repo_root, cleanup_job_id):
+            print("✗ tmp-* leftovers after failure path")
+            return False
+        print("✓ No tmp-* leftovers after failure path")
         
         
         print("\n" + "=" * 60)
