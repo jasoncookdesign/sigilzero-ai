@@ -9,3 +9,8 @@ logs:
 
 ps:
 	docker compose ps
+
+smoke:
+	docker compose up -d --build sigilzeroai-api sigilzeroai-worker
+	curl -sS http://localhost:8080/ | head
+	curl -s -X POST "http://localhost:8080/jobs/run" -H "Content-Type: application/json" -d '{"job_ref":"jobs/ig-test-001/brief.yaml","params":{}}' -w "\nHTTP_STATUS=%{http_code}\n"
