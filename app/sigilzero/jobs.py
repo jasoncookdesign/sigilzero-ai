@@ -16,6 +16,13 @@ JOB_PIPELINE_REGISTRY = {
 }
 
 
+def resolve_pipeline(job_type: str):
+    pipeline_fn = JOB_PIPELINE_REGISTRY.get(job_type)
+    if pipeline_fn is None:
+        raise ValueError(f"Unsupported job_type: {job_type}")
+    return pipeline_fn
+
+
 def get_redis() -> Redis:
     return Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
 
@@ -42,10 +49,7 @@ def execute_job(repo_root: str, job_ref: str, params: Optional[Dict[str, Any]] =
         data = yaml.safe_load(f) or {}
     brief = BriefSpec.model_validate(data)
     
-    pipeline_fn = JOB_PIPELINE_REGISTRY.get(brief.job_type)
-    if pipeline_fn is None:
-        raise ValueError(f"Unsupported job_type: {brief.job_type}")
-
+    pipeline_fn = resolve_pipeline(brief.job_type)
     return pipeline_fn(repo_root, job_ref, params=params)
 
 

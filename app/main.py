@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import os
 import yaml
+from pathlib import Path
 
 from sigilzero.jobs import enqueue_job
 from sigilzero.core.schemas import BriefSpec
@@ -42,13 +43,26 @@ def run_job(req: JobRunRequest):
     """
     repo_root = os.getenv("SIGILZERO_REPO_ROOT", "/app")
 
-    full = os.path.join(repo_root, req.job_ref)
-    if not os.path.isfile(full):
-        raise HTTPException(status_code=400, detail=f"job_ref not found at {full}")
+    if os.path.isabs(req.job_ref):
+        raise HTTPException(status_code=400, detail="job_ref must be a relative path under jobs/")
+
+    ref_parts = Path(req.job_ref).parts
+    if not ref_parts or ref_parts[0] != "jobs" or any(part == ".." for part in ref_parts):
+        raise HTTPException(status_code=400, detail="job_ref must resolve under jobs/")
+
+    repo_root_path = Path(repo_root).resolve()
+    full_path = (repo_root_path / req.job_ref).resolve()
+    try:
+        full_path.relative_to(repo_root_path)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="job_ref must resolve within repository root")
+
+    if not full_path.is_file():
+        raise HTTPException(status_code=400, detail=f"job_ref not found at {full_path}")
 
     # Phase 1.0: Load brief to get governance job_id
     try:
-        with open(full, "r", encoding="utf-8") as f:
+        with open(full_path, "r", encoding="utf-8") as f:
             brief_data = yaml.safe_load(f) or {}
         brief = BriefSpec.model_validate(brief_data)
         governance_job_id = brief.job_id

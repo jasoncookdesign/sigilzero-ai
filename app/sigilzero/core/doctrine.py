@@ -9,6 +9,11 @@ from .hashing import sha256_bytes
 from .schemas import DoctrineReference
 
 
+ALLOWED_DOCTRINE_IDS = {
+    "prompts/instagram_copy",
+}
+
+
 class DoctrineLoader:
     """Loads and validates versioned doctrine files.
     
@@ -41,6 +46,18 @@ class DoctrineLoader:
         Raises:
             FileNotFoundError: If doctrine file not found
         """
+        if doctrine_id not in ALLOWED_DOCTRINE_IDS:
+            raise ValueError(f"Unsupported doctrine_id: {doctrine_id}")
+
+        if doctrine_id.startswith("/") or ".." in doctrine_id.split("/"):
+            raise ValueError(f"Unsafe doctrine_id: {doctrine_id}")
+
+        if version.startswith("/") or ".." in version.split("/"):
+            raise ValueError(f"Unsafe doctrine version: {version}")
+
+        if filename.startswith("/") or ".." in filename.split("/"):
+            raise ValueError(f"Unsafe doctrine filename: {filename}")
+
         # Try multiple possible locations
         possible_paths = [
             self.repo_root / doctrine_id / version / filename,

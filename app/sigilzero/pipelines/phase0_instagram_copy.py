@@ -30,6 +30,9 @@ from sigilzero.core.schemas import (
 )
 
 
+_LEGACY_ALIAS_WARNING_EMITTED = False
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -40,7 +43,22 @@ def _read_yaml(path: Path) -> Dict[str, Any]:
 
 
 def _resolve_repo_path(repo_root: str, rel_path: str) -> Path:
-    p = Path(repo_root) / rel_path
+    if Path(rel_path).is_absolute():
+        raise ValueError("job_ref must be relative")
+
+    parts = Path(rel_path).parts
+    if not parts or parts[0] != "jobs" or any(part == ".." for part in parts):
+        raise ValueError("job_ref must resolve under jobs/")
+
+    repo_root_path = Path(repo_root).resolve()
+    p = (repo_root_path / rel_path).resolve()
+    failed_exc: Exception | None = None
+
+    try:
+        p.relative_to(repo_root_path)
+    except ValueError:
+        raise ValueError("job_ref resolves outside repository root")
+
     if not p.exists():
         raise FileNotFoundError(f"job_ref not found at {p}")
     return p
@@ -88,6 +106,7 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
     5. Filesystem authoritative; manifest is source of truth
     """
     params = params or {}
+    started_monotonic = time.monotonic()
 
     # Phase 1: Resolve and validate brief
     brief_path = _resolve_repo_path(repo_root, job_ref)
@@ -208,7 +227,9 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
     ensure_dir(runs_root)
     ensure_dir(legacy_runs_root)
     run_id = None
-    run_dir = None
+    final_run_dir = None
+    symlink_actions: List[str] = []
+    promoted_legacy = False
     
     def _read_manifest_inputs_hash(dir_path: Path) -> str | None:
         """Read inputs_hash from manifest.json, return None if not found/invalid."""
@@ -233,16 +254,23 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
         return dirs
 
     def _ensure_legacy_symlink(candidate_run_id: str) -> None:
+        nonlocal symlink_actions
+        global _LEGACY_ALIAS_WARNING_EMITTED
         legacy_path = legacy_runs_root / candidate_run_id
         if legacy_path.exists():
             return
         try:
             target_rel = Path("..") / brief.job_id / candidate_run_id
             legacy_path.symlink_to(target_rel)
+            symlink_actions.append(f"legacy_alias_created:{legacy_path}->{target_rel}")
         except OSError:
-            pass
+            if not _LEGACY_ALIAS_WARNING_EMITTED:
+                print("[legacy_alias] unable to create artifacts/runs symlink; continuing with canonical path only")
+                _LEGACY_ALIAS_WARNING_EMITTED = True
+            symlink_actions.append("legacy_alias_failed")
 
     def _promote_legacy_to_canonical(candidate_run_id: str, existing_path: Path) -> Path:
+        nonlocal promoted_legacy
         canonical_path = runs_root / candidate_run_id
         legacy_path = legacy_runs_root / candidate_run_id
 
@@ -257,6 +285,7 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
         # Promote legacy directory to canonical layout
         if legacy_path.exists() and not legacy_path.is_symlink():
             legacy_path.rename(canonical_path)
+            promoted_legacy = True
             _ensure_legacy_symlink(candidate_run_id)
             return canonical_path
 
@@ -271,17 +300,26 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
     if not base_candidates:
         # No collision, use canonical base run_id
         run_id = base_run_id
-        run_dir = runs_root / base_run_id
+        final_run_dir = runs_root / base_run_id
     else:
         # Collision: check if idempotent replay in any known location
         for candidate in base_candidates:
             existing_hash = _read_manifest_inputs_hash(candidate)
             if existing_hash == inputs_hash:
                 run_id = base_run_id
-                run_dir = _promote_legacy_to_canonical(base_run_id, candidate)
+                final_run_dir = _promote_legacy_to_canonical(base_run_id, candidate)
                 if temp_dir.exists():
                     shutil.rmtree(temp_dir)
-                return {"run_id": run_id, "artifact_dir": str(run_dir), "idempotent_replay": True}
+                print(
+                    f"[run_header] job_id={brief.job_id} job_ref={job_ref} inputs_hash={inputs_hash} "
+                    f"run_id={run_id} queue_job_id={queue_job_id} doctrine={doctrine_ref.version}/{doctrine_ref.sha256}"
+                )
+                elapsed = time.monotonic() - started_monotonic
+                print(
+                    f"[run_footer] status=idempotent_replay artifact_dir={final_run_dir} elapsed_s={elapsed:.3f} "
+                    f"actions={','.join(symlink_actions) or 'none'}"
+                )
+                return {"run_id": run_id, "artifact_dir": str(final_run_dir), "idempotent_replay": True}
 
         # Different inputs_hash: scan deterministic suffixes across canonical + legacy
         suffix = 2
@@ -291,7 +329,7 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
             if not suffixed_candidates:
                 # Found next available deterministic suffix in canonical location
                 run_id = suffixed_run_id
-                run_dir = runs_root / suffixed_run_id
+                final_run_dir = runs_root / suffixed_run_id
                 break
 
             # Check if any suffixed run is idempotent replay
@@ -299,27 +337,34 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
                 suffixed_hash = _read_manifest_inputs_hash(candidate)
                 if suffixed_hash == inputs_hash:
                     run_id = suffixed_run_id
-                    run_dir = _promote_legacy_to_canonical(suffixed_run_id, candidate)
+                    final_run_dir = _promote_legacy_to_canonical(suffixed_run_id, candidate)
                     if temp_dir.exists():
                         shutil.rmtree(temp_dir)
-                    return {"run_id": run_id, "artifact_dir": str(run_dir), "idempotent_replay": True}
+                    print(
+                        f"[run_header] job_id={brief.job_id} job_ref={job_ref} inputs_hash={inputs_hash} "
+                        f"run_id={run_id} queue_job_id={queue_job_id} doctrine={doctrine_ref.version}/{doctrine_ref.sha256}"
+                    )
+                    elapsed = time.monotonic() - started_monotonic
+                    print(
+                        f"[run_footer] status=idempotent_replay artifact_dir={final_run_dir} elapsed_s={elapsed:.3f} "
+                        f"actions={','.join(symlink_actions) or 'none'}"
+                    )
+                    return {"run_id": run_id, "artifact_dir": str(final_run_dir), "idempotent_replay": True}
 
             suffix += 1
             if suffix > 1000:
                 raise RuntimeError(f"Exceeded maximum collision suffix for run_id {base_run_id}")
     
-    # Atomically rename temp_dir to final run_dir
-    try:
-        temp_dir.rename(run_dir)
-    except Exception as e:
-        # Cleanup temp_dir on rename failure
+    if run_id is None or final_run_dir is None:
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
-        raise RuntimeError(f"Failed to atomically create run directory {run_dir}: {e}") from e
-    
-    # Create legacy compatibility symlink: artifacts/runs/<run_id> -> artifacts/<job_id>/<run_id>
-    _ensure_legacy_symlink(run_id)
+        raise RuntimeError("Failed to resolve deterministic run destination")
 
+    print(
+        f"[run_header] job_id={brief.job_id} job_ref={job_ref} inputs_hash={inputs_hash} "
+        f"run_id={run_id} queue_job_id={queue_job_id} doctrine={doctrine_ref.version}/{doctrine_ref.sha256}"
+    )
+    
     # Create input snapshot metadata for manifest
     input_snapshots = {
         "brief": InputSnapshot(
@@ -374,6 +419,8 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
         context_content_hash=context_content_hash,
         langfuse_trace_id=trace_id,
     )
+
+    failed_exc: Exception | None = None
 
     try:
         # Generation spec (using model_config from snapshot)
@@ -444,7 +491,7 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
             md_lines.append("")
         out_md = "\n".join(md_lines).strip() + "\n"
 
-        out_path = run_dir / "outputs" / "instagram_captions.md"
+        out_path = temp_dir / "outputs" / "instagram_captions.md"
         write_text(out_path, out_md)
 
         # Record artifact hashes
@@ -458,15 +505,38 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
         manifest.status = "failed"
         manifest.finished_at = _utc_now()
         manifest.error = f"{type(e).__name__}: {e}"
-        raise
+        failed_exc = e
     finally:
         # Always write manifest
-        write_json(run_dir / "manifest.json", json.loads(manifest.model_dump_json()))
+        write_json(temp_dir / "manifest.json", json.loads(manifest.model_dump_json()))
         # Clean up temp directory if it still exists (shouldn't happen in success path)
-        if temp_dir.exists():
+        if temp_dir.exists() and final_run_dir.exists():
             try:
                 shutil.rmtree(temp_dir)
             except Exception:
                 pass  # Best effort cleanup
 
-    return {"run_id": run_id, "artifact_dir": str(run_dir)}
+    # Atomically rename completed temp run to canonical destination
+    try:
+        temp_dir.rename(final_run_dir)
+    except Exception as rename_error:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        raise RuntimeError(f"Failed to atomically finalize run directory {final_run_dir}: {rename_error}") from rename_error
+
+    _ensure_legacy_symlink(run_id)
+
+    elapsed = time.monotonic() - started_monotonic
+    actions = []
+    if promoted_legacy:
+        actions.append("promoted_legacy")
+    actions.extend(symlink_actions)
+    print(
+        f"[run_footer] status={manifest.status} artifact_dir={final_run_dir} elapsed_s={elapsed:.3f} "
+        f"actions={','.join(actions) or 'none'}"
+    )
+
+    if failed_exc is not None:
+        raise RuntimeError(manifest.error or "Pipeline failed") from failed_exc
+
+    return {"run_id": run_id, "artifact_dir": str(final_run_dir)}

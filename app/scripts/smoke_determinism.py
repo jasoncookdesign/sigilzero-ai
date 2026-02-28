@@ -155,6 +155,7 @@ def run_smoke_tests():
             return False
         print(f"✓ First execution inputs_hash: {inputs_hash1}")
         print(f"  Full run_id: {run_id1}")
+        manifest_bytes_before_replay = manifest_path1.read_bytes()
         
         # Log doctrine resolution (proof of in-repo versioning)
         doctrine_info = manifest1.get("doctrine", {})
@@ -165,6 +166,12 @@ def run_smoke_tests():
             if "resolved_path" in doctrine_info:
                 resolved_path = doctrine_info['resolved_path']
                 print(f"    Resolved path (repo-relative): {resolved_path}")
+                if Path(resolved_path).is_absolute():
+                    print("    ✗ WARNING: doctrine resolved_path must not be absolute")
+                    return False
+                if ".." in Path(resolved_path).parts:
+                    print("    ✗ WARNING: doctrine resolved_path must not contain '..' segments")
+                    return False
                 # Verify it's actually repo-relative and in-repo
                 full_doctrine_path = Path(repo_root) / resolved_path
                 if full_doctrine_path.exists():
@@ -201,6 +208,20 @@ def run_smoke_tests():
             return False
         
         print(f"✓ Idempotent replay successful: same run_id={run_id2}")
+
+        # manifest bytes should remain byte-identical on idempotent replay
+        manifest_bytes_after_replay = manifest_path1.read_bytes()
+        if manifest_bytes_after_replay != manifest_bytes_before_replay:
+            print("✗ Manifest bytes changed across idempotent replay")
+            return False
+        print("✓ Manifest bytes are identical across idempotent replay")
+
+        # queue_job_id must never influence run_id
+        result2b = execute_instagram_copy_pipeline(repo_root, job_ref, params={"queue_job_id": "queue-test-123"})
+        if result2b["run_id"] != run_id1:
+            print("✗ queue_job_id influenced run_id")
+            return False
+        print("✓ queue_job_id does not influence run_id")
         
         # Test 4: Validate inputs_hash consistency
         print("\n[Test 4] Validate inputs_hash determinism")
@@ -308,6 +329,48 @@ def run_smoke_tests():
         
         print(f"✓ Single canonical run directory: {canonical_run_id}")
         print(f"  Path: {canonical_dir}")
+
+        # Test 9: Deterministic collision suffix behavior
+        print("\n[Test 9] Validate deterministic collision suffix")
+        base_manifest_path = runs_dir / run_id1 / "manifest.json"
+        original_manifest_bytes = base_manifest_path.read_bytes()
+        base_manifest_data = json.loads(original_manifest_bytes.decode("utf-8"))
+        base_manifest_data["inputs_hash"] = "sha256:" + "f" * 64
+        base_manifest_path.write_text(
+            json.dumps(base_manifest_data, sort_keys=True, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        result3 = execute_instagram_copy_pipeline(repo_root, job_ref, params={})
+        run_id3 = result3["run_id"]
+        cleanup_ids.append(run_id3)
+
+        if run_id3 == run_id1:
+            print("✗ Collision suffix test failed: expected suffixed run_id")
+            return False
+        if not run_id3.startswith(run_id1 + "-"):
+            print(f"✗ Collision suffix run_id format invalid: {run_id3}")
+            return False
+        suffix = run_id3[len(run_id1) + 1 :]
+        if not suffix.isdigit() or int(suffix) < 2:
+            print(f"✗ Collision suffix must be deterministic integer >=2: {run_id3}")
+            return False
+        print(f"✓ Deterministic collision suffix used: {run_id3}")
+
+        # Restore base manifest before cleanup to keep state consistent
+        base_manifest_path.write_bytes(original_manifest_bytes)
+
+        # Test 10: Legacy consumer compatibility (symlink OR canonical discovery)
+        print("\n[Test 10] Validate legacy consumer compatibility")
+        legacy_alias = Path(repo_root) / "artifacts" / "runs" / run_id1
+        canonical_manifest = Path(repo_root) / "artifacts" / cleanup_job_id / run_id1 / "manifest.json"
+        if legacy_alias.exists():
+            print(f"✓ Legacy alias exists: {legacy_alias}")
+        elif canonical_manifest.exists():
+            print("✓ Legacy alias absent but canonical manifest exists (reindex can discover canonical layout)")
+        else:
+            print("✗ Neither legacy alias nor canonical manifest exists")
+            return False
         
         
         print("\n" + "=" * 60)

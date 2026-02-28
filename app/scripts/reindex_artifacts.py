@@ -1,42 +1,146 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sigilzero.core.db import connect, exec_sql, init_db
+from sigilzero.core.hashing import compute_inputs_hash, derive_run_id, sha256_bytes
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _discover_manifests(repo_root: Path) -> List[Path]:
+def _discover_run_dirs(repo_root: Path) -> List[Tuple[Path, str]]:
     artifacts_root = repo_root / "artifacts"
     if not artifacts_root.exists():
         return []
 
-    manifests: List[Path] = []
+    run_dirs: List[Tuple[Path, str]] = []
 
-    # Canonical layout: artifacts/<job_id>/<run_id>/manifest.json
-    for manifest in artifacts_root.glob("*/*/manifest.json"):
-        if not manifest.is_file():
+    # Canonical layout: artifacts/<job_id>/<run_id>/
+    for job_dir in artifacts_root.iterdir():
+        if not job_dir.is_dir():
             continue
-        parent_job = manifest.parents[1].name
-        if parent_job == "runs":
+        if job_dir.name in {"runs", ".git"}:
             continue
-        manifests.append(manifest)
+        for run_dir in job_dir.iterdir():
+            if not run_dir.is_dir() or run_dir.name.startswith("."):
+                continue
+            run_dirs.append((run_dir, "canonical"))
 
-    # Legacy layout: artifacts/runs/<run_id>/manifest.json
+    # Legacy layout: artifacts/runs/<run_id>/
     legacy_runs = artifacts_root / "runs"
     if legacy_runs.exists():
-        manifests.extend([p for p in legacy_runs.glob("*/manifest.json") if p.is_file()])
+        for run_dir in legacy_runs.iterdir():
+            if run_dir.name.startswith("."):
+                continue
+            if run_dir.is_dir() or run_dir.is_symlink():
+                run_dirs.append((run_dir, "legacy"))
+
+    return run_dirs
+
+
+def _discover_manifests(repo_root: Path) -> Tuple[List[Tuple[Path, str]], int, int]:
+    run_dirs = _discover_run_dirs(repo_root)
+
+    valid_candidates: List[Tuple[Path, str]] = []
+    missing_manifest = 0
+    malformed_json = 0
+
+    for run_dir, source in run_dirs:
+        manifest_path = run_dir / "manifest.json"
+        if not manifest_path.exists():
+            missing_manifest += 1
+            print(f"WARN missing manifest: {run_dir}")
+            continue
+        try:
+            _ = _load_manifest(manifest_path)
+        except Exception as exc:
+            malformed_json += 1
+            print(f"WARN malformed manifest JSON: {manifest_path} ({exc})")
+            continue
+        valid_candidates.append((manifest_path, source))
+
+    return valid_candidates, missing_manifest, malformed_json
+
+
+def _choose_preferred_manifest(
+    current: Tuple[Path, str],
+    candidate: Tuple[Path, str],
+) -> Tuple[Path, str]:
+    current_path, current_source = current
+    candidate_path, candidate_source = candidate
+
+    if current_source == "canonical" and candidate_source == "legacy":
+        return current
+    if candidate_source == "canonical" and current_source == "legacy":
+        return candidate
+    return candidate if str(candidate_path) < str(current_path) else current
+
+
+def _validate_manifest_integrity(manifest: Dict[str, Any], manifest_path: Path) -> List[str]:
+    errors: List[str] = []
+
+    job_id = manifest.get("job_id")
+    run_id = manifest.get("run_id")
+    inputs_hash = manifest.get("inputs_hash")
+
+    if not job_id:
+        errors.append("missing job_id")
+    if not run_id:
+        errors.append("missing run_id")
+    if not inputs_hash:
+        errors.append("missing inputs_hash")
+
+    if errors:
+        return errors
+
+    required_snapshots = {
+        "brief": "inputs/brief.resolved.json",
+        "context": "inputs/context.resolved.json",
+        "model_config": "inputs/model_config.json",
+        "doctrine": "inputs/doctrine.resolved.json",
+    }
+
+    snapshot_hashes: Dict[str, str] = {}
+    for name, rel_path in required_snapshots.items():
+        snapshot_path = manifest_path.parent / rel_path
+        if not snapshot_path.exists():
+            errors.append(f"missing snapshot: {rel_path}")
+            continue
+        snapshot_hashes[name] = sha256_bytes(snapshot_path.read_bytes())
+
+    if len(snapshot_hashes) == len(required_snapshots):
+        recomputed_inputs_hash = compute_inputs_hash(snapshot_hashes)
+        if recomputed_inputs_hash != inputs_hash:
+            errors.append(
+                f"inputs_hash mismatch (manifest={inputs_hash}, recomputed={recomputed_inputs_hash})"
+            )
+
+        base_run_id = derive_run_id(inputs_hash)
+        if run_id == base_run_id:
+            pass
+        elif run_id.startswith(base_run_id + "-"):
+            suffix = run_id[len(base_run_id) + 1 :]
+            if not suffix.isdigit() or int(suffix) < 2:
+                errors.append(f"invalid deterministic suffix in run_id: {run_id}")
+            else:
+                expected = derive_run_id(inputs_hash, suffix)
+                if expected != run_id:
+                    errors.append(f"run_id derivation mismatch (expected={expected}, actual={run_id})")
+        else:
+            errors.append(f"run_id does not derive from inputs_hash (base={base_run_id}, actual={run_id})")
+
+    return errors
 
     # Dedupe by resolved path so symlinked legacy entries don't double-index
     unique: Dict[str, Path] = {}
@@ -50,9 +154,30 @@ def _load_manifest(path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
-def reindex(repo_root: Path) -> int:
-    manifests = _discover_manifests(repo_root)
-    print(f"Discovered {len(manifests)} manifest(s) under {repo_root / 'artifacts'}")
+def reindex(repo_root: Path, verify: bool = False) -> int:
+    candidates, missing_manifest_count, malformed_json_count = _discover_manifests(repo_root)
+
+    deduped: Dict[Tuple[str, str], Tuple[Path, str]] = {}
+    skipped_missing_fields = 0
+    for manifest_path, source in candidates:
+        manifest = _load_manifest(manifest_path)
+        job_id = manifest.get("job_id")
+        run_id = manifest.get("run_id")
+        if not job_id or not run_id:
+            skipped_missing_fields += 1
+            print(f"WARN missing required manifest fields job_id/run_id: {manifest_path}")
+            continue
+        key = (str(job_id), str(run_id))
+        if key not in deduped:
+            deduped[key] = (manifest_path, source)
+        else:
+            deduped[key] = _choose_preferred_manifest(deduped[key], (manifest_path, source))
+
+    print(
+        f"Discovered manifests: {len(candidates)}, unique runs: {len(deduped)}, "
+        f"missing_manifest: {missing_manifest_count}, malformed_json: {malformed_json_count}, "
+        f"missing_required_fields: {skipped_missing_fields}"
+    )
 
     with connect() as conn:
         init_db(conn)
@@ -77,20 +202,20 @@ def reindex(repo_root: Path) -> int:
 
         indexed = 0
         skipped = 0
-        for manifest_path in manifests:
-            try:
-                manifest = _load_manifest(manifest_path)
-            except Exception as exc:
-                skipped += 1
-                print(f"SKIP unreadable manifest: {manifest_path} ({exc})")
-                continue
+        verify_failures = 0
 
-            job_id = manifest.get("job_id")
-            run_id = manifest.get("run_id")
-            if not job_id or not run_id:
-                skipped += 1
-                print(f"SKIP invalid manifest (missing job_id/run_id): {manifest_path}")
-                continue
+        for (job_id, run_id), (manifest_path, _source) in sorted(deduped.items()):
+            manifest = _load_manifest(manifest_path)
+
+            if verify:
+                integrity_errors = _validate_manifest_integrity(manifest, manifest_path)
+                if integrity_errors:
+                    verify_failures += 1
+                    skipped += 1
+                    print(f"VERIFY FAIL: {manifest_path}")
+                    for err in integrity_errors:
+                        print(f"  - {err}")
+                    continue
 
             artifact_dir = str(manifest_path.parent.relative_to(repo_root)).replace(os.sep, "/")
 
@@ -128,14 +253,27 @@ def reindex(repo_root: Path) -> int:
             )
             indexed += 1
 
-    print(f"Indexed: {indexed}, Skipped: {skipped}")
+    report = (
+        f"Indexed: {indexed}, Skipped: {skipped}, Verify failures: {verify_failures if verify else 0}, "
+        f"Missing manifests: {missing_manifest_count}, Malformed JSON: {malformed_json_count}, "
+        f"Missing required fields: {skipped_missing_fields}"
+    )
+    print(report)
+
+    if verify and (verify_failures > 0 or malformed_json_count > 0 or skipped_missing_fields > 0):
+        return 1
+
     return 0
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Reindex run manifests from filesystem artifacts")
+    parser.add_argument("--verify", action="store_true", help="Verify manifest integrity while reindexing")
+    args = parser.parse_args()
+
     repo_root = Path(os.getenv("SIGILZERO_REPO_ROOT", "/app"))
     try:
-        return reindex(repo_root)
+        return reindex(repo_root, verify=args.verify)
     except Exception as exc:
         print(f"Reindex failed: {exc}", file=sys.stderr)
         return 1

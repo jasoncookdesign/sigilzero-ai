@@ -22,3 +22,15 @@ smoke_determinism:
 reindex:
 	@echo "Rebuilding DB index from filesystem manifests..."
 	docker exec -e DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres:5432/postgres sz_worker python /app/scripts/reindex_artifacts.py
+
+reindex_verify:
+	@echo "Reindex + integrity verification from filesystem manifests..."
+	docker exec -e DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres:5432/postgres sz_worker python /app/scripts/reindex_artifacts.py --verify
+
+cleanup_tmp:
+	@echo "Cleaning stale tmp-* run directories older than 6 hours..."
+	docker exec sz_worker python /app/scripts/cleanup_tmp.py --hours 6
+
+smoke_registry:
+	@echo "Running registry/governance smoke checks..."
+	docker exec sz_worker python /app/scripts/smoke_registry.py
