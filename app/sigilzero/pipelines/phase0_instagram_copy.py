@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 import uuid
 from datetime import datetime, timezone
@@ -10,8 +11,9 @@ from typing import Any, Dict, List, Tuple
 
 import yaml
 
+from sigilzero.core.doctrine import get_doctrine_loader
 from sigilzero.core.fs import ensure_dir, write_text, write_json
-from sigilzero.core.hashing import sha256_bytes, sha256_json
+from sigilzero.core.hashing import sha256_bytes, sha256_json, compute_inputs_hash, derive_run_id
 from sigilzero.core.langfuse_client import get_langfuse
 from sigilzero.core.model import generate_text
 from sigilzero.core.prompting import load_prompt_template
@@ -19,9 +21,11 @@ from sigilzero.core.schemas import (
     BriefSpec,
     ContextSpec,
     ContextSelector,
+    DoctrineReference,
     GenerationSpec,
     IGCopyPackage,
     IGCaption,
+    InputSnapshot,
     RunManifest,
 )
 
@@ -74,94 +78,271 @@ def _materialize_context(repo_root: str, spec: ContextSpec) -> Tuple[str, str]:
 
 
 def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    """Phase 0: brief.yaml -> instagram_captions.md + manifest.json (local-first)."""
+    """Phase 1.0: Deterministic governance pipeline with canonical input snapshots.
+    
+    Determinism Guardrails:
+    1. All inputs written as JSON snapshots BEFORE processing
+    2. run_id derived deterministically from inputs_hash
+    3. job_id comes from brief (governance identifier)
+    4. Doctrine loaded and hashed
+    5. Filesystem authoritative; manifest is source of truth
+    """
     params = params or {}
 
-    # Resolve + validate brief
+    # Phase 1: Resolve and validate brief
     brief_path = _resolve_repo_path(repo_root, job_ref)
     brief_raw = brief_path.read_bytes()
-    brief_file_hash = sha256_bytes(brief_raw)
-
     brief_data = _read_yaml(brief_path)
     brief = BriefSpec.model_validate(brief_data)
-    brief.brief_hash = sha256_json(brief.model_dump(exclude={"brief_hash", "repo_commit"}))
-
-    # Create run folder
-    run_id = str(uuid.uuid4())
-    run_dir = Path(repo_root) / "artifacts" / "runs" / run_id
-    ensure_dir(run_dir / "inputs")
-    ensure_dir(run_dir / "outputs")
-
-    # Save input snapshot
-    (run_dir / "inputs" / "brief.yaml").write_bytes(brief_raw)
-
+    
+    # Get queue job ID from params (RQ job UUID)
+    queue_job_id = params.get("queue_job_id")
+    
+    # Phase 1.0: Create temp directory for atomic run creation
+    # Use .tmp/ subdirectory to avoid polluting runs/ listing
+    tmp_base = Path(repo_root) / "artifacts" / "runs" / ".tmp"
+    ensure_dir(tmp_base)
+    temp_id = f"tmp-{uuid.uuid4().hex[:16]}"
+    temp_dir = tmp_base / temp_id
+    ensure_dir(temp_dir / "inputs")
+    ensure_dir(temp_dir / "outputs")
+    
+    # Phase 1.0 INVARIANT: Write canonical JSON snapshots FIRST
+    # These snapshots are the source of truth for inputs_hash computation
+    
+    # 1. Brief snapshot
+    brief_resolved = brief.model_dump(exclude={"brief_hash", "repo_commit"})
+    write_json(temp_dir / "inputs" / "brief.resolved.json", brief_resolved)
+    brief_snapshot_bytes = (temp_dir / "inputs" / "brief.resolved.json").read_bytes()
+    brief_snapshot_hash = sha256_bytes(brief_snapshot_bytes)
+    
+    # 2. Context spec and content
+    context_spec = ContextSpec(
+        job_ref=job_ref,
+        job_type=brief.job_type,
+        brand=brief.brand,
+        selectors=[
+            ContextSelector(root="corpus", include_globs=["identity/*.md", "strategy/*.md", "artifacts/*.md"]),
+        ],
+    )
+    context_content, context_content_hash = _materialize_context(repo_root, context_spec)
+    
+    # Write context snapshot
+    context_resolved = {
+        "spec": context_spec.model_dump(exclude={"context_spec_hash"}),
+        "content": context_content,
+        "content_hash": context_content_hash,
+    }
+    write_json(temp_dir / "inputs" / "context.resolved.json", context_resolved)
+    context_snapshot_bytes = (temp_dir / "inputs" / "context.resolved.json").read_bytes()
+    context_snapshot_hash = sha256_bytes(context_snapshot_bytes)
+    
+    # 3. Model configuration
+    model_config = {
+        "provider": os.getenv("LLM_PROVIDER", "openai"),
+        "model": os.getenv("LLM_MODEL", "gpt-4.1-mini"),
+        "temperature": float(os.getenv("LLM_TEMPERATURE", "0.3")),
+        "top_p": float(os.getenv("LLM_TOP_P", "1.0")),
+        "response_schema": "response_schemas/ig_copy_package",
+        "response_schema_version": "v1.0.0",
+        "cache_enabled": True,
+    }
+    write_json(temp_dir / "inputs" / "model_config.json", model_config)
+    model_snapshot_bytes = (temp_dir / "inputs" / "model_config.json").read_bytes()
+    model_snapshot_hash = sha256_bytes(model_snapshot_bytes)
+    
+    # 4. Doctrine (prompt template) - Phase 1.0 governance requirement
+    doctrine_loader = get_doctrine_loader(repo_root)
+    template_id = "prompts/instagram_copy"
+    template_version = "v1.0.0"
+    prompt_template, doctrine_ref = doctrine_loader.load_doctrine(
+        doctrine_id=template_id,
+        version=template_version,
+        filename="template.md"
+    )
+    
+    # Write doctrine snapshot
+    doctrine_resolved = {
+        "doctrine_id": doctrine_ref.doctrine_id,
+        "version": doctrine_ref.version,
+        "content": prompt_template,
+        "sha256": doctrine_ref.sha256,
+    }
+    write_json(temp_dir / "inputs" / "doctrine.resolved.json", doctrine_resolved)
+    doctrine_snapshot_bytes = (temp_dir / "inputs" / "doctrine.resolved.json").read_bytes()
+    doctrine_snapshot_hash = sha256_bytes(doctrine_snapshot_bytes)
+    
+    # Phase 1.0 INVARIANT: Compute inputs_hash from snapshot hashes
+    snapshot_hashes = {
+        "brief": brief_snapshot_hash,
+        "context": context_snapshot_hash,
+        "model_config": model_snapshot_hash,
+        "doctrine": doctrine_snapshot_hash,
+    }
+    inputs_hash = compute_inputs_hash(snapshot_hashes)
+    
+    # Phase 1.0 INVARIANT: Derive deterministic run_id from inputs_hash
+    base_run_id = derive_run_id(inputs_hash)
+    
+    # Phase 1.0 COLLISION SEMANTICS: Idempotent replay with deterministic suffix
+    #
+    # Rules:
+    # 1. If artifacts/runs/<base_run_id> does NOT exist: use it.
+    # 2. If it exists:
+    #    a) Read its manifest.json and compare manifest.inputs_hash to computed inputs_hash
+    #    b) If SAME: treat as idempotent replay; return existing run_id (no new run directory)
+    #    c) If DIFFERENT: scan for deterministic suffix -2, -3, ... 
+    #       - For each suffixed dir, check if manifest.inputs_hash matches
+    #       - If match found: return that run_id (idempotent replay)
+    #       - Otherwise: use next available integer suffix
+    #
+    # This ensures:
+    # - Same inputs => same run_id (idempotent)
+    # - Different inputs => different run_id (deterministic collision resolution)
+    # - No orphaned staging dirs (temp_dir cleaned up in finally)
+    
+    runs_root = Path(repo_root) / "artifacts" / "runs"
+    run_id = None
+    run_dir = None
+    
+    def _read_manifest_inputs_hash(dir_path: Path) -> str | None:
+        """Read inputs_hash from manifest.json, return None if not found/invalid."""
+        manifest_path = dir_path / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        try:
+            with manifest_path.open("r") as f:
+                data = json.load(f)
+                return data.get("inputs_hash")
+        except Exception:
+            return None
+    
+    # Check base run_id
+    base_dir = runs_root / base_run_id
+    if not base_dir.exists():
+        # No collision, use base run_id
+        run_id = base_run_id
+        run_dir = base_dir
+    else:
+        # Collision: check if idempotent replay
+        existing_hash = _read_manifest_inputs_hash(base_dir)
+        if existing_hash == inputs_hash:
+            # IDEMPOTENT REPLAY: same inputs, return existing run
+            run_id = base_run_id
+            run_dir = base_dir
+            # Clean up temp directory since we're reusing existing run
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
+            return {"run_id": run_id, "artifact_dir": str(run_dir), "idempotent_replay": True}
+        
+        # Different inputs_hash: scan for deterministic suffix
+        suffix = 2
+        while True:
+            suffixed_run_id = f"{base_run_id}-{suffix}"
+            suffixed_dir = runs_root / suffixed_run_id
+            if not suffixed_dir.exists():
+                # Found available suffix
+                run_id = suffixed_run_id
+                run_dir = suffixed_dir
+                break
+            else:
+                # Check if this suffix matches our inputs_hash (idempotent replay)
+                suffixed_hash = _read_manifest_inputs_hash(suffixed_dir)
+                if suffixed_hash == inputs_hash:
+                    # IDEMPOTENT REPLAY with suffix
+                    run_id = suffixed_run_id
+                    run_dir = suffixed_dir
+                    # Clean up temp directory
+                    if temp_dir.exists():
+                        shutil.rmtree(temp_dir)
+                    return {"run_id": run_id, "artifact_dir": str(run_dir), "idempotent_replay": True}
+                # Not a match, try next suffix
+                suffix += 1
+                # Safety: prevent infinite loop (shouldn't happen in practice)
+                if suffix > 1000:
+                    raise RuntimeError(f"Exceeded maximum collision suffix for run_id {base_run_id}")
+    
+    # Atomically rename temp_dir to final run_dir
+    try:
+        temp_dir.rename(run_dir)
+    except Exception as e:
+        # Cleanup temp_dir on rename failure
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        raise RuntimeError(f"Failed to atomically create run directory {run_dir}: {e}") from e
+    
+    # Create input snapshot metadata for manifest
+    input_snapshots = {
+        "brief": InputSnapshot(
+            path="inputs/brief.resolved.json",
+            sha256=brief_snapshot_hash,
+            bytes=len(brief_snapshot_bytes),
+        ),
+        "context": InputSnapshot(
+            path="inputs/context.resolved.json",
+            sha256=context_snapshot_hash,
+            bytes=len(context_snapshot_bytes),
+        ),
+        "model_config": InputSnapshot(
+            path="inputs/model_config.json",
+            sha256=model_snapshot_hash,
+            bytes=len(model_snapshot_bytes),
+        ),
+        "doctrine": InputSnapshot(
+            path="inputs/doctrine.resolved.json",
+            sha256=doctrine_snapshot_hash,
+            bytes=len(doctrine_snapshot_bytes),
+        ),
+    }
+    
     # Langfuse trace
     lf = get_langfuse()
     trace_id = None
     if lf is not None:
         trace = lf.trace(
             name=f"job:{brief.job_type}",
-            input={"job_ref": job_ref, "brief_hash": brief.brief_hash, "brief_file_hash": brief_file_hash},
-            metadata={"job_id": brief.job_id, "brand": brief.brand},
+            input={"job_id": brief.job_id, "run_id": run_id, "inputs_hash": inputs_hash},
+            metadata={"job_id": brief.job_id, "brand": brief.brand, "queue_job_id": queue_job_id},
         )
         trace_id = trace.id
-
+    
+    # Phase 1.0: Create manifest with governance fields
     manifest = RunManifest(
-        run_id=run_id,
+        schema_version="1.1.0",  # Phase 1.0
+        job_id=brief.job_id,  # Governance identifier from brief
+        run_id=run_id,  # Deterministic from inputs
+        queue_job_id=queue_job_id,  # RQ job UUID (ephemeral)
         job_ref=job_ref,
         job_type=brief.job_type,
         started_at=_utc_now(),
         status="running",
-        brief_hash=brief.brief_hash,
+        inputs_hash=inputs_hash,
+        input_snapshots={k: v.model_dump() for k, v in input_snapshots.items()},
+        doctrine=doctrine_ref.model_dump(),
+        # Legacy hashes (backward compatibility)
+        brief_hash=sha256_json(brief.model_dump(exclude={"brief_hash", "repo_commit"})),
+        context_spec_hash=sha256_json(context_spec.model_dump(exclude={"context_spec_hash"})),
+        context_content_hash=context_content_hash,
         langfuse_trace_id=trace_id,
     )
 
     try:
-        # Build context spec (job-centric; avoid release fields)
-        context_spec = ContextSpec(
-            job_ref=job_ref,
-            job_type=brief.job_type,
-            brand=brief.brand,
-            selectors=[
-                ContextSelector(root="corpus", include_globs=["identity/*.md", "strategy/*.md", "artifacts/*.md"]),
-            ],
-        )
-        context_spec.context_spec_hash = sha256_json(context_spec.model_dump(exclude={"context_spec_hash"}))
-        manifest.context_spec_hash = context_spec.context_spec_hash
-
-        # Materialize context pack (content + hash)
-        if lf is not None:
-            span_ctx = lf.span(trace_id=trace_id, name="materialize_context_pack", input=context_spec.model_dump())
-        else:
-            span_ctx = None
-
-        context_content, context_content_hash = _materialize_context(repo_root, context_spec)
-        manifest.context_content_hash = context_content_hash
-
-        if span_ctx is not None:
-            span_ctx.end(output={"context_content_hash": context_content_hash, "chars": len(context_content)})
-
-        # Prompt + generation spec
-        template_id = "prompts/instagram_copy"
-        template_version = "v1.0.0"
-        prompt_template = load_prompt_template(repo_root, template_id, template_version)
-
+        # Generation spec (using model_config from snapshot)
         gen_spec = GenerationSpec(
-            provider=os.getenv("LLM_PROVIDER", "openai"),
-            model=os.getenv("LLM_MODEL", "gpt-4.1-mini"),
-            temperature=float(os.getenv("LLM_TEMPERATURE", "0.3")),
-            top_p=float(os.getenv("LLM_TOP_P", "1.0")),
+            provider=model_config["provider"],
+            model=model_config["model"],
+            temperature=model_config["temperature"],
+            top_p=model_config["top_p"],
             prompt_template=template_id,
             prompt_template_version=template_version,
             context_content_hash=context_content_hash,
-            response_schema="response_schemas/ig_copy_package",
-            response_schema_version="v1.0.0",
-            cache_enabled=True,
+            response_schema=model_config["response_schema"],
+            response_schema_version=model_config["response_schema_version"],
+            cache_enabled=model_config["cache_enabled"],
         )
         gen_spec.generation_hash = sha256_json(gen_spec.model_dump(exclude={"generation_hash"}))
         manifest.generation_hash = gen_spec.generation_hash
 
-        # Model call (single-shot)
         # Format template with brief and context
         prompt = prompt_template.format(
             brief=f"Brand: {brief.brand}\nArtist: {brief.artist or 'N/A'}\nTitle: {brief.title or 'N/A'}\nTone: {', '.join(brief.tone_tags)}\n\nIG Settings:\nCaptions needed: {brief.ig.caption_count}\nHashtags needed: {brief.ig.hashtag_count}\nMax chars: {brief.ig.max_caption_chars}\nInclude CTA: {brief.ig.include_cta}\nInclude Emojis: {brief.ig.include_emojis}",
@@ -232,5 +413,11 @@ def execute_instagram_copy_pipeline(repo_root: str, job_ref: str, params: Dict[s
     finally:
         # Always write manifest
         write_json(run_dir / "manifest.json", json.loads(manifest.model_dump_json()))
+        # Clean up temp directory if it still exists (shouldn't happen in success path)
+        if temp_dir.exists():
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass  # Best effort cleanup
 
     return {"run_id": run_id, "artifact_dir": str(run_dir)}

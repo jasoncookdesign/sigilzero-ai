@@ -21,7 +21,18 @@ def write_text(path: Path | str, content: str) -> None:
 
 
 def write_json(path: Path | str, data: Any) -> None:
-    """Write JSON data to file, creating parent directories as needed."""
+    """Write JSON data to file with canonical deterministic formatting.
+    
+    Phase 1.0 Determinism: JSON snapshots must be byte-stable for hashing.
+    - sort_keys=True for deterministic key order
+    - ensure_ascii=False to preserve Unicode
+    - indent=2 for readability (stable whitespace)
+    - trailing newline enforced
+    """
     p = Path(path)
     ensure_dir(p.parent)
-    p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    json_str = json.dumps(data, sort_keys=True, ensure_ascii=False, indent=2)
+    # Enforce trailing newline for POSIX compliance and git-friendliness
+    if not json_str.endswith("\n"):
+        json_str += "\n"
+    p.write_text(json_str, encoding="utf-8")

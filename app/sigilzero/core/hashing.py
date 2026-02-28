@@ -37,3 +37,50 @@ def hash_pydantic_model(model: Any, *, exclude: Iterable[str] = ()) -> str:
 
 def hash_dict(d: Dict[str, Any]) -> str:
     return sha256_text(canonical_json(d))
+
+
+def compute_inputs_hash(snapshot_hashes: Dict[str, str]) -> str:
+    """Compute deterministic inputs_hash from snapshot hashes.
+    
+    Phase 1.0 Determinism: inputs_hash is computed from canonical snapshot hashes only.
+    Order is alphabetical by key for determinism.
+    
+    Args:
+        snapshot_hashes: Dict mapping snapshot name to its sha256 hash
+                        e.g., {"brief": "sha256:abc...", "context": "sha256:def..."}
+    
+    Returns:
+        Combined hash in format "sha256:..."
+    """
+    # Sort keys alphabetically for determinism
+    sorted_items = sorted(snapshot_hashes.items())
+    combined = canonical_json(dict(sorted_items))
+    return sha256_text(combined)
+
+
+def derive_run_id(inputs_hash: str, suffix: str = "") -> str:
+    """Derive deterministic run_id from inputs_hash.
+    
+    Phase 1.0 Determinism: run_id is purely a function of inputs.
+    
+    Args:
+        inputs_hash: The inputs_hash (sha256:...)
+        suffix: Optional deterministic suffix (e.g., for retry logic)
+    
+    Returns:
+        Deterministic run_id string
+    """
+    # Extract hex portion from "sha256:..." format
+    if inputs_hash.startswith("sha256:"):
+        hex_hash = inputs_hash[7:]
+    else:
+        hex_hash = inputs_hash
+    
+    # Use first 32 chars of hex as base run_id (128 bits = UUID-equivalent entropy)
+    run_id = hex_hash[:32]
+    
+    if suffix:
+        # Append deterministic suffix with separator
+        run_id = f"{run_id}-{suffix}"
+    
+    return run_id

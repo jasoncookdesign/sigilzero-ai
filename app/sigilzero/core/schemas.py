@@ -183,17 +183,55 @@ class IGCopyPackage(BaseModel):
 # Pipeline outputs
 # -----------------------------
 
+class InputSnapshot(BaseModel):
+    """Metadata for a canonical input snapshot."""
+    path: str  # Relative to run directory, e.g., "inputs/brief.resolved.json"
+    sha256: str
+    bytes: int
+    
+    
+class DoctrineReference(BaseModel):
+    """Reference to doctrine version used in execution."""
+    doctrine_id: str  # e.g., "prompts/instagram_copy"
+    version: str  # e.g., "v1.0.0"
+    sha256: str  # Hash of doctrine content
+    resolved_at: str  # ISO timestamp
+    resolved_path: str | None = None  # Path where doctrine was found (debug info)
+
+
 class RunManifest(BaseModel):
-    """Execution manifest for a job run."""
-    schema_version: str = Field(default="1.0.0")
-    run_id: str
-    job_ref: str
+    """Execution manifest for a job run.
+    
+    Phase 1.0 Determinism Guardrails:
+    - All inputs are snapshotted as JSON before processing
+    - run_id is derived deterministically from inputs_hash
+    - job_id comes from governance (brief.job_id)
+    - queue_job_id is the RQ job UUID
+    - Filesystem is authoritative; DB is index-only
+    """
+    schema_version: str = Field(default="1.1.0")  # Bumped for Phase 1.0
+    
+    # Governance identifiers
+    job_id: str  # From brief.job_id (governance identifier)
+    run_id: str  # Deterministic: derived from inputs_hash
+    queue_job_id: Optional[str] = None  # RQ job UUID (ephemeral queue identifier)
+    
+    # Job metadata
+    job_ref: str  # Path to brief.yaml
     job_type: str
     started_at: str
     finished_at: Optional[str] = None
     status: str  # running, succeeded, failed
     
-    # Content hashes for determinism
+    # Phase 1.0: Canonical input snapshots
+    inputs_hash: Optional[str] = None  # Hash of all input snapshots combined
+    input_snapshots: Dict[str, InputSnapshot] = Field(default_factory=dict)
+    # Keys: "brief", "context", "model_config", "doctrine" (if applicable)
+    
+    # Doctrine reference (if job type uses doctrine)
+    doctrine: Optional[DoctrineReference] = None
+    
+    # Legacy content hashes (kept for backward compatibility)
     brief_hash: Optional[str] = None
     context_spec_hash: Optional[str] = None
     context_content_hash: Optional[str] = None

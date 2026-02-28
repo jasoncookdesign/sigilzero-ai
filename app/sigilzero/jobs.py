@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from rq import Queue
+from rq import Queue, get_current_job
 from redis import Redis
 from typing import Any, Dict, Optional
 
@@ -19,14 +19,27 @@ def get_queue() -> Queue:
     return Queue("sigilzero", connection=get_redis())
 
 
-def execute_job(repo_root: str, job_ref: str, params: Optional[Dict[str, Any]] = None) -> str:
-    """RQ job target: dispatches by job_type found in brief.yaml and returns run_id."""
+def execute_job(repo_root: str, job_ref: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """RQ job target: dispatches by job_type found in brief.yaml.
+    
+    Phase 1.0: Returns dict with run_id and other metadata.
+    Passes queue_job_id (RQ UUID) to pipeline for manifest tracking.
+    """
+    params = params or {}
+    
+    # Phase 1.0: Get RQ job ID (ephemeral queue identifier)
+    current_job = get_current_job()
+    if current_job:
+        params["queue_job_id"] = current_job.id
+    
     full = os.path.join(repo_root, job_ref)
     with open(full, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     brief = BriefSpec.model_validate(data)
+    
     if brief.job_type == "instagram_copy":
         return execute_instagram_copy_pipeline(repo_root, job_ref, params=params)
+    
     raise ValueError(f"Unsupported job_type: {brief.job_type}")
 
 
