@@ -215,11 +215,16 @@ class InputSnapshot(BaseModel):
     
     
 class DoctrineReference(BaseModel):
-    """Reference to doctrine version used in execution."""
+    """Reference to doctrine version used in execution.
+    
+    Phase 1.0 Determinism: resolved_at is excluded from serialization to ensure
+    deterministic manifests. Only content-based fields (doctrine_id, version, sha256)
+    participate in authoritative artifacts.
+    """
     doctrine_id: str  # e.g., "prompts/instagram_copy"
     version: str  # e.g., "v1.0.0"
     sha256: str  # Hash of doctrine content
-    resolved_at: str  # ISO timestamp
+    resolved_at: str | None = Field(default=None, exclude=True)  # Excluded for determinism
     resolved_path: str | None = None  # Path where doctrine was found (debug info)
 
 

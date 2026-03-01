@@ -1,0 +1,10 @@
+job_id: brand-score-001
+job_type: brand_compliance_score
+content:
+  title: "Authentic Innovation"
+  body: "We're pushing boundaries while staying true to our values. Quality is non-negotiable. Transparency is our foundation. Every piece reflects our commitment to authentic innovation."
+  channels:
+    - instagram
+    - tiktok
+brand_identity_scope: "brand_voice+positioning"
+evaluation_focus: "authenticity,alignment_with_values,clarity,strategic_fit"

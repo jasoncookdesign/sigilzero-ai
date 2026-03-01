@@ -11,6 +11,7 @@ from .schemas import DoctrineReference
 
 ALLOWED_DOCTRINE_IDS = {
     "prompts/instagram_copy",
+    "prompts/brand_compliance_score",
 }
 
 
@@ -86,12 +87,11 @@ class DoctrineLoader:
         content = content_bytes.decode("utf-8")
         content_hash = sha256_bytes(content_bytes)
         
-        # Create reference
+        # Create reference (resolved_at omitted for determinism)
         ref = DoctrineReference(
             doctrine_id=doctrine_id,
             version=version,
             sha256=content_hash,
-            resolved_at=datetime.now(timezone.utc).isoformat(),
         )
         
         # Store resolved path as repo-relative POSIX path for determinism

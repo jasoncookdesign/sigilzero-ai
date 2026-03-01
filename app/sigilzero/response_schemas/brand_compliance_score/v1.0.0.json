@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Brand Compliance Score",
+  "description": "Output schema for brand compliance scoring pipeline",
+  "type": "object",
+  "required": ["scores", "overall_score", "recommendations"],
+  "properties": {
+    "scores": {
+      "type": "object",
+      "description": "Compliance scores across multiple dimensions",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["score", "reasoning"],
+        "properties": {
+          "score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Compliance score (0-100)"
+          },
+          "reasoning": {
+            "type": "string",
+            "description": "Explanation for the score"
+          }
+        }
+      }
+    },
+    "overall_score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Overall compliance score (aggregate)"
+    },
+    "recommendations": {
+      "type": "array",
+      "description": "Actionable recommendations for improving brand alignment",
+      "items": {
+        "type": "string"
+      }
+    },
+    "guidance_alignment": {
+      "type": "object",
+      "description": "High-level alignment assessment with brand guidance",
+      "properties": {
+        "brand_voice": {
+          "type": "string",
+          "enum": ["strong", "good", "moderate", "weak"],
+          "description": "Alignment with brand voice principles"
+        },
+        "brand_positioning": {
+          "type": "string",
+          "enum": ["strong", "good", "moderate", "weak"],
+          "description": "Alignment with brand positioning"
+        },
+        "values_expression": {
+          "type": "string",
+          "enum": ["strong", "good", "moderate", "weak"],
+          "description": "Expression of brand values"
+        }
+      }
+    }
+  }
+}

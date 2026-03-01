@@ -59,16 +59,37 @@ def _discover_manifests(repo_root: Path) -> Tuple[List[Tuple[Path, str]], int, i
 
     for run_dir, source in run_dirs:
         # Check if this is an orphaned symlink (broken legacy alias)
-        if run_dir.is_symlink() and not run_dir.exists():
-            orphaned_symlinks_detected += 1
-            print(f"WARN orphaned symlink: {run_dir}")
-            # Attempt to clean it up
+        # Robust detection: explicitly resolve symlink target and check existence
+        if run_dir.is_symlink():
             try:
-                run_dir.unlink()
-                print(f"  → cleaned up broken symlink")
+                symlink_target = run_dir.readlink()
+                # Resolve relative targets against symlink's parent
+                if not symlink_target.is_absolute():
+                    resolved_target = (run_dir.parent / symlink_target).resolve()
+                else:
+                    resolved_target = symlink_target
+                
+                # Check if resolved target exists
+                if not resolved_target.exists():
+                    orphaned_symlinks_detected += 1
+                    print(f"WARN orphaned symlink: {run_dir} -> {symlink_target} (target missing)")
+                    # Attempt to clean it up
+                    try:
+                        run_dir.unlink()
+                        print(f"  → cleaned up broken symlink")
+                    except Exception as e:
+                        print(f"  → failed to clean: {e}")
+                    continue
             except Exception as e:
-                print(f"  → failed to clean: {e}")
-            continue
+                # If we can't read the symlink, treat as orphaned
+                orphaned_symlinks_detected += 1
+                print(f"WARN unreadable symlink: {run_dir} ({e})")
+                try:
+                    run_dir.unlink()
+                    print(f"  → cleaned up unreadable symlink")
+                except Exception as cleanup_err:
+                    print(f"  → failed to clean: {cleanup_err}")
+                continue
         
         manifest_path = run_dir / "manifest.json"
         if not manifest_path.exists():
@@ -117,19 +138,27 @@ def _validate_manifest_integrity(manifest: Dict[str, Any], manifest_path: Path) 
     if errors:
         return errors
 
-    required_snapshots = {
-        "brief": "inputs/brief.resolved.json",
-        "context": "inputs/context.resolved.json",
-        "model_config": "inputs/model_config.json",
-        "doctrine": "inputs/doctrine.resolved.json",
-    }
+    # Validate all snapshots declared in manifest.input_snapshots
     manifest_input_snapshots = manifest.get("input_snapshots")
     if not isinstance(manifest_input_snapshots, dict):
         errors.append("missing or invalid input_snapshots metadata")
-        manifest_input_snapshots = {}
+        return errors
+    
+    if not manifest_input_snapshots:
+        errors.append("input_snapshots is empty")
+        return errors
 
     snapshot_hashes: Dict[str, str] = {}
-    for name, rel_path in required_snapshots.items():
+    for name, snapshot_meta in manifest_input_snapshots.items():
+        if not isinstance(snapshot_meta, dict):
+            errors.append(f"missing input_snapshots.{name} metadata")
+            continue
+        
+        rel_path = snapshot_meta.get("path")
+        if not rel_path:
+            errors.append(f"input_snapshots.{name}.path missing")
+            continue
+        
         snapshot_path = manifest_path.parent / rel_path
         if not snapshot_path.exists():
             errors.append(f"missing snapshot: {rel_path}")
@@ -139,14 +168,6 @@ def _validate_manifest_integrity(manifest: Dict[str, Any], manifest_path: Path) 
         snapshot_hash = sha256_bytes(snapshot_bytes)
         snapshot_hashes[name] = snapshot_hash
 
-        snapshot_meta = manifest_input_snapshots.get(name)
-        if not isinstance(snapshot_meta, dict):
-            errors.append(f"missing input_snapshots.{name} metadata")
-            continue
-        if snapshot_meta.get("path") != rel_path:
-            errors.append(
-                f"input_snapshots.{name}.path mismatch (manifest={snapshot_meta.get('path')}, expected={rel_path})"
-            )
         if snapshot_meta.get("sha256") != snapshot_hash:
             errors.append(
                 f"input_snapshots.{name}.sha256 mismatch (manifest={snapshot_meta.get('sha256')}, recomputed={snapshot_hash})"
@@ -202,7 +223,8 @@ def _validate_manifest_integrity(manifest: Dict[str, Any], manifest_path: Path) 
                     f"doctrine_content_hash_mismatch (manifest={doc_sha256_in_manifest}, recomputed={doctrine_content_hash})"
                 )
 
-    if len(snapshot_hashes) == len(required_snapshots):
+    # Validate inputs_hash derivation from all snapshot hashes
+    if len(snapshot_hashes) == len(manifest_input_snapshots):
         recomputed_inputs_hash = compute_inputs_hash(snapshot_hashes)
         if recomputed_inputs_hash != inputs_hash:
             # Check if snapshot or doctrine errors already explain the mismatch
