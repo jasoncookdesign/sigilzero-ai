@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
-"""Phase 1.0 Determinism Smoke Tests
+"""
+Smoke Tests: Phase 1.0 Determinism Guardrails Verification
 
-Validates that the determinism guardrails are working correctly:
-1. Same inputs => same inputs_hash => same run_id
-2. Idempotent replay returns existing run without creating duplicates
-3. No orphaned temp directories after execution
-4. Canonical JSON snapshots are byte-stable
+Tests critical determinism invariants:
+1. Identical inputs → same run_id
+2. Different inputs → different run_id
+3. All snapshots present and verify
+4. Snapshot hashes match manifest
+5. run_id derivation from inputs_hash
+6. Chainable: prior changes → run changes
+7. Backward compatibility
 """
 
+from __future__ import annotations
+
 import json
-import os
 import shutil
 import sys
 import difflib
 from pathlib import Path
 from typing import Dict, Any
 
-# Add app directory to path for imports
+# Add app to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sigilzero.pipelines.phase0_instagram_copy import execute_instagram_copy_pipeline
-import sigilzero.pipelines.phase0_instagram_copy as pipeline_module
-from sigilzero.core.hashing import sha256_bytes, compute_inputs_hash
+from sigilzero.core.determinism import (
+    DeterminismVerifier,
+    SnapshotValidator,
+    replay_run_idempotent,
+)
+from sigilzero.core.hashing import sha256_bytes, compute_inputs_hash, derive_run_id
 
 
 def cleanup_test_artifacts(repo_root: str, run_ids: list[str], job_id: str | None = None) -> None:

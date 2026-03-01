@@ -283,11 +283,6 @@ class RunManifest(BaseModel):
     queue_job_id: Optional[str] = None  # RQ job UUID (ephemeral queue identifier)
     
     # Job metadata
-    job_id: str  # From brief.job_id (governance identifier)
-    run_id: str  # Deterministic: derived from inputs_hash
-    queue_job_id: Optional[str] = None  # RQ job UUID (ephemeral queue identifier)
-    
-    # Job metadata
     job_ref: str  # Path to brief.yaml
     job_type: str
     started_at: str = Field(exclude=True)  # BLOCKER 1 FIX: Exclude wall-clock time from determinism

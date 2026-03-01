@@ -40,7 +40,7 @@ from sigilzero.core.schemas import (
     ChainMetadata,
 )
 from sigilzero.core.fs import ensure_dir, write_json
-from sigilzero.core.doctrine import DoctrineLoader
+from sigilzero.core.doctrine import get_doctrine_loader
 from sigilzero.core.langfuse_client import get_langfuse
 
 
@@ -203,14 +203,17 @@ def run_brand_optimization(job_ref: str, repo_root: str) -> RunManifest:
         write_json(temp_dir / "inputs" / "model_config.json", model_config)
         
         # 4. Doctrine (load from prior or create new)
+        # Phase 1.0: Even if stage doesn't use doctrine, snapshot it for consistency
+        # and to ensure any future doctrine dependency is captured deterministically
         doctrine_content = "{}"
-        doctrine_snapshot_hash = sha256_bytes(doctrine_content.encode("utf-8"))
+        doctrine_id = "brand_optimization"
+        doctrine_version = "v1.0.0"
         
+        # Write doctrine snapshot with deterministic structure
         doctrine_resolved = {
-            "doctrine_id": "brand_optimization",
-            "version": "v1.0.0",
+            "doctrine_id": doctrine_id,
+            "version": doctrine_version,
             "sha256": sha256_bytes(doctrine_content.encode("utf-8")),
-            "content": doctrine_content,
         }
         write_json(temp_dir / "inputs" / "doctrine.resolved.json", doctrine_resolved)
         doctrine_snapshot_bytes = (temp_dir / "inputs" / "doctrine.resolved.json").read_bytes()
@@ -377,8 +380,8 @@ def run_brand_optimization(job_ref: str, repo_root: str) -> RunManifest:
             inputs_hash=inputs_hash,
             input_snapshots={k: v.model_dump() for k, v in input_snapshots.items()},
             doctrine=DoctrineReference(
-                doctrine_id="brand_optimization",
-                version="v1.0.0",
+                doctrine_id=doctrine_id,
+                version=doctrine_version,
                 sha256=doctrine_snapshot_hash,
             ).model_dump(exclude_unset=True),
             artifacts={
