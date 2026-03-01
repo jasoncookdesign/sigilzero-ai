@@ -31,6 +31,10 @@ smoke_brand_compliance:
 	@echo "Running Stage 7 Brand Compliance Scoring Smoke Tests..."
 	docker exec sz_worker python /app/scripts/smoke_brand_compliance.py
 
+smoke_chain:
+	@echo "Running Stage 8 Chainable Pipeline Smoke Tests..."
+	docker exec sz_worker python /app/scripts/smoke_brand_optimization.py
+
 reindex:
 	@echo "Rebuilding DB index from filesystem manifests..."
 	docker exec -e DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres:5432/postgres sz_worker python /app/scripts/reindex_artifacts.py

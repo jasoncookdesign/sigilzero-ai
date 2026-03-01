@@ -21,6 +21,20 @@ class BriefBlock(BaseModel):
     content: str
 
 
+# Phase 8: Chainable pipeline support
+class ChainInput(BaseModel):
+    """Input specification for chainable pipelines (Phase 8).
+    
+    Allows one pipeline to consume output from a prior pipeline.
+    prior_run_id participates in inputs_hash to ensure determinism:
+    - Same prior_run_id + same new inputs → same run_id
+    - Different prior_run_id → different run_id (no silent drift)
+    """
+    prior_run_id: str  # UUID from prior stage (DATA INPUT, not governance)
+    prior_stage: str  # Name of prior stage (e.g., "brand_compliance_score")
+    required_outputs: List[str] = Field(default_factory=list)  # Required output files
+
+
 # -----------------------------
 # Phase 0: Job briefs + runs
 # -----------------------------
@@ -63,6 +77,11 @@ class BriefSpec(BaseModel):
 
     # Freeform input blocks (legacy; kept for compatibility)
     inputs: Dict[str, str] = Field(default_factory=dict)
+    
+    # Chain inputs (Phase 8: Chainable pipelines)
+    # If set, this pipeline chains after another pipeline
+    chainable: bool = Field(default=False)  # Stage supports chaining?
+    chain_inputs: Optional[ChainInput] = None  # Prior stage reference (if chaining)
     
     # Internal fields
     brief_hash: Optional[str] = None
@@ -207,6 +226,24 @@ class IGCopyPackage(BaseModel):
 # Pipeline outputs
 # -----------------------------
 
+class ChainedStage(BaseModel):
+    """Record of a prior stage in a chain (for manifest audit trail)."""
+    run_id: str
+    job_id: str
+    stage: str
+    output_references: List[str] = Field(default_factory=list)  # Paths to outputs used
+
+
+class ChainMetadata(BaseModel):
+    """Chain execution metadata recorded in manifest.
+    
+    Phase 1.0: Chain information is immutable once finalized.
+    Each stage in chain records its prior stage(s) for complete audit trail.
+    """
+    is_chainable_stage: bool = False  # Is this output from a chainable pipeline?
+    prior_stages: List[ChainedStage] = Field(default_factory=list)  # All prior stages in chain
+
+
 class InputSnapshot(BaseModel):
     """Metadata for a canonical input snapshot."""
     path: str  # Relative to run directory, e.g., "inputs/brief.resolved.json"
@@ -238,7 +275,7 @@ class RunManifest(BaseModel):
     - queue_job_id is the RQ job UUID
     - Filesystem is authoritative; DB is index-only
     """
-    schema_version: str = Field(default="1.1.0")  # Bumped for Phase 1.0
+    schema_version: str = Field(default="1.2.0")  # Bumped for Phase 8: chainable pipelines
     
     # Governance identifiers
     job_id: str  # From brief.job_id (governance identifier)
@@ -246,10 +283,15 @@ class RunManifest(BaseModel):
     queue_job_id: Optional[str] = None  # RQ job UUID (ephemeral queue identifier)
     
     # Job metadata
+    job_id: str  # From brief.job_id (governance identifier)
+    run_id: str  # Deterministic: derived from inputs_hash
+    queue_job_id: Optional[str] = None  # RQ job UUID (ephemeral queue identifier)
+    
+    # Job metadata
     job_ref: str  # Path to brief.yaml
     job_type: str
-    started_at: str
-    finished_at: Optional[str] = None
+    started_at: str = Field(exclude=True)  # BLOCKER 1 FIX: Exclude wall-clock time from determinism
+    finished_at: Optional[str] = Field(default=None, exclude=True)  # BLOCKER 1 FIX: Exclude wall-clock time
     status: str  # running, succeeded, failed
     
     # Phase 1.0: Canonical input snapshots
@@ -271,6 +313,9 @@ class RunManifest(BaseModel):
     
     # Stage 5: Generation mode metadata (for variants, format, etc.)
     generation_metadata: Dict[str, Any] = Field(default_factory=dict)
+    
+    # Phase 8: Chain metadata (enables pipeline composition)
+    chain_metadata: ChainMetadata = Field(default_factory=ChainMetadata)
     
     # Outputs and metadata
     artifacts: Dict[str, Dict[str, Any]] = Field(default_factory=dict)

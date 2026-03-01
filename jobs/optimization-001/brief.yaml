@@ -1,0 +1,10 @@
+stage: brand_optimization
+job_id: optimization-001
+chainable: true
+chain_inputs:
+  prior_run_id: faa5aa5e64e7454d9d789a455e59a63f
+  prior_stage: brand_compliance_score
+  required_outputs:
+    - compliance_scores.json
+brand: SIGIL.ZERO
+job_type: brand_optimization
