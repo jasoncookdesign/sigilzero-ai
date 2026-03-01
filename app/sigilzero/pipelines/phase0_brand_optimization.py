@@ -96,7 +96,11 @@ def _read_yaml(path: Path) -> Dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
-def run_brand_optimization(job_ref: str, repo_root: str) -> RunManifest:
+def run_brand_optimization(
+    job_ref: str,
+    repo_root: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> RunManifest:
     """
     Execute Stage 8: Brand Optimization (Chainable Pipeline)
     
@@ -117,6 +121,9 @@ def run_brand_optimization(job_ref: str, repo_root: str) -> RunManifest:
     Raises:
         ValueError: If prior artifact not found or inputs missing
     """
+    params = params or {}
+    queue_job_id = params.get("queue_job_id")
+
     repo_root = Path(repo_root)
     job_brief_path = repo_root / job_ref
     
@@ -208,12 +215,13 @@ def run_brand_optimization(job_ref: str, repo_root: str) -> RunManifest:
         doctrine_content = "{}"
         doctrine_id = "brand_optimization"
         doctrine_version = "v1.0.0"
+        doctrine_content_hash = sha256_bytes(doctrine_content.encode("utf-8"))
         
         # Write doctrine snapshot with deterministic structure
         doctrine_resolved = {
             "doctrine_id": doctrine_id,
             "version": doctrine_version,
-            "sha256": sha256_bytes(doctrine_content.encode("utf-8")),
+            "sha256": doctrine_content_hash,
         }
         write_json(temp_dir / "inputs" / "doctrine.resolved.json", doctrine_resolved)
         doctrine_snapshot_bytes = (temp_dir / "inputs" / "doctrine.resolved.json").read_bytes()
@@ -275,23 +283,54 @@ def run_brand_optimization(job_ref: str, repo_root: str) -> RunManifest:
         final_run_dir = None
         symlink_actions: List[str] = []
         
-        # Check for existing run
-        for existing_run_dir in runs_root.iterdir():
-            if not existing_run_dir.is_dir():
-                continue
-            if existing_run_dir.name == base_run_id:
-                existing_inputs_hash = _read_manifest_inputs_hash(existing_run_dir)
-                if existing_inputs_hash == inputs_hash:
-                    # Deterministic idempotent replay
-                    run_id = base_run_id
-                    final_run_dir = existing_run_dir
+        def _load_existing_manifest(run_dir: Path) -> RunManifest:
+            with (run_dir / "manifest.json").open("r", encoding="utf-8") as f:
+                return RunManifest.model_validate(json.load(f))
+
+        # Check base run_id first for idempotent replay
+        base_run_dir = runs_root / base_run_id
+        if base_run_dir.exists() and (base_run_dir / "manifest.json").exists():
+            existing_inputs_hash = _read_manifest_inputs_hash(base_run_dir)
+            if existing_inputs_hash == inputs_hash:
+                elapsed = time.monotonic() - started_monotonic
+                print(
+                    f"[run_header] job_id={brief.job_id} job_ref={job_ref} "
+                    f"inputs_hash={inputs_hash} run_id={base_run_id} queue_job_id={queue_job_id} "
+                    f"doctrine={doctrine_version}/{doctrine_content_hash}"
+                )
+                print(
+                    f"[run_footer] status=idempotent_replay artifact_dir={base_run_dir} elapsed_s={elapsed:.3f} "
+                    f"actions=none"
+                )
+                return _load_existing_manifest(base_run_dir)
+
+        # Deterministic suffix scan for collisions with different inputs
+        run_id = base_run_id
+        final_run_dir = runs_root / base_run_id
+        if final_run_dir.exists() and (final_run_dir / "manifest.json").exists():
+            suffix = 2
+            while True:
+                candidate_run_id = f"{base_run_id}-{suffix}"
+                candidate_dir = runs_root / candidate_run_id
+                if not candidate_dir.exists() or not (candidate_dir / "manifest.json").exists():
+                    run_id = candidate_run_id
+                    final_run_dir = candidate_dir
                     break
-        
-        if not run_id:
-            # New run
-            final_run_dir = runs_root / base_run_id
-            ensure_dir(final_run_dir / "inputs" / "outputs")
-            run_id = base_run_id
+
+                candidate_inputs_hash = _read_manifest_inputs_hash(candidate_dir)
+                if candidate_inputs_hash == inputs_hash:
+                    elapsed = time.monotonic() - started_monotonic
+                    print(
+                        f"[run_header] job_id={brief.job_id} job_ref={job_ref} "
+                        f"inputs_hash={inputs_hash} run_id={candidate_run_id} queue_job_id={queue_job_id} "
+                        f"doctrine={doctrine_version}/{doctrine_content_hash}"
+                    )
+                    print(
+                        f"[run_footer] status=idempotent_replay artifact_dir={candidate_dir} elapsed_s={elapsed:.3f} "
+                        f"actions=none"
+                    )
+                    return _load_existing_manifest(candidate_dir)
+                suffix += 1
         
         # Ensure legacy symlink to canonical location
         symlink_action = _ensure_legacy_symlink(run_id, final_run_dir)
@@ -299,46 +338,45 @@ def run_brand_optimization(job_ref: str, repo_root: str) -> RunManifest:
         # Print run header
         print(
             f"[run_header] job_id={brief.job_id} job_ref={job_ref} "
-            f"inputs_hash=sha256:{inputs_hash} run_id={run_id} queue_job_id=None "
-            f"doctrine=v1.0.0/sha256:{'0' * 56}"
+            f"inputs_hash={inputs_hash} run_id={run_id} queue_job_id={queue_job_id} "
+            f"doctrine={doctrine_version}/{doctrine_content_hash}"
         )
         
         # If this is a fresh run, process outputs
-        if (final_run_dir / "manifest.json").exists():
-            status = "idempotent_replay"
-            actions = []
-        else:
-            status = "succeeded"
-            actions = [symlink_action]  # Use actual symlink action
-            
-            # Phase 8 INVARIANT: Copy all snapshots to final location (atomic finalization)
-            snapshot_files = [
-                "brief.resolved.json",
-                "context.resolved.json",
-                "model_config.json",
-                "doctrine.resolved.json",
-                "prior_artifact.resolved.json",  # CRITICAL: Include prior artifact
-            ]
-            for filename in snapshot_files:
-                src = temp_dir / "inputs" / filename
-                dst = final_run_dir / "inputs" / filename
-                if src.exists():
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst)
-                else:
-                    raise RuntimeError(f"Expected snapshot not found: {src}")
-            
-            # Generate optimized output (placeholder)
-            optimization_output = {
-                "job_id": brief.job_id,
-                "prior_run_id": prior_run_id,
-                "status": "optimization_complete",
-                "recommendations": [
-                    "Increase brand consistency in messaging",
-                    "Enhance emotional resonance while maintaining tone",
-                ],
-            }
-            write_json(final_run_dir / "outputs" / "optimization.json", optimization_output)
+        status = "succeeded"
+        actions = [symlink_action]
+
+        ensure_dir(final_run_dir / "inputs")
+        ensure_dir(final_run_dir / "outputs")
+
+        # Phase 8 INVARIANT: Copy all snapshots to final location (atomic finalization)
+        snapshot_files = [
+            "brief.resolved.json",
+            "context.resolved.json",
+            "model_config.json",
+            "doctrine.resolved.json",
+            "prior_artifact.resolved.json",
+        ]
+        for filename in snapshot_files:
+            src = temp_dir / "inputs" / filename
+            dst = final_run_dir / "inputs" / filename
+            if src.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+            else:
+                raise RuntimeError(f"Expected snapshot not found: {src}")
+
+        # Generate optimized output (placeholder)
+        optimization_output = {
+            "job_id": brief.job_id,
+            "prior_run_id": prior_run_id,
+            "status": "optimization_complete",
+            "recommendations": [
+                "Increase brand consistency in messaging",
+                "Enhance emotional resonance while maintaining tone",
+            ],
+        }
+        write_json(final_run_dir / "outputs" / "optimization.json", optimization_output)
         
         # Create input snapshots metadata
         input_snapshots = {
@@ -373,6 +411,7 @@ def run_brand_optimization(job_ref: str, repo_root: str) -> RunManifest:
         manifest = RunManifest(
             job_id=brief.job_id,
             run_id=run_id,
+            queue_job_id=queue_job_id,
             job_ref=job_ref,
             job_type="brand_optimization",
             started_at=_utc_now(),
@@ -382,7 +421,7 @@ def run_brand_optimization(job_ref: str, repo_root: str) -> RunManifest:
             doctrine=DoctrineReference(
                 doctrine_id=doctrine_id,
                 version=doctrine_version,
-                sha256=doctrine_snapshot_hash,
+                sha256=doctrine_content_hash,
             ).model_dump(exclude_unset=True),
             artifacts={
                 "optimization": {
@@ -407,9 +446,7 @@ def run_brand_optimization(job_ref: str, repo_root: str) -> RunManifest:
         
         # Write manifest
         manifest_path = final_run_dir / "manifest.json"
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        with manifest_path.open("w", encoding="utf-8") as f:
-            json.dump(manifest.model_dump(by_alias=False), f, indent=2, ensure_ascii=False)
+        write_json(manifest_path, manifest.model_dump(by_alias=False))
         
         elapsed = time.monotonic() - started_monotonic
         print(

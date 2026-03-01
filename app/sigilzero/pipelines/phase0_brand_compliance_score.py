@@ -520,9 +520,7 @@ def run_brand_compliance_score(
         }
         
         manifest_path = final_run_dir / "manifest.json"
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        with manifest_path.open("w", encoding="utf-8") as f:
-            json.dump(manifest.model_dump(by_alias=False), f, indent=2, ensure_ascii=False)
+        write_json(manifest_path, manifest.model_dump(by_alias=False))
         
         elapsed = time.monotonic() - started_monotonic
         print(
@@ -539,9 +537,7 @@ def run_brand_compliance_score(
         manifest.error = str(e)
         
         manifest_path = final_run_dir / "manifest.json"
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        with manifest_path.open("w", encoding="utf-8") as f:
-            json.dump(manifest.model_dump(by_alias=False), f, indent=2, ensure_ascii=False)
+        write_json(manifest_path, manifest.model_dump(by_alias=False))
         
         elapsed = time.monotonic() - started_monotonic
         print(

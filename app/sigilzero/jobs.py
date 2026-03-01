@@ -9,10 +9,24 @@ import yaml  # type: ignore
 
 from .core.schemas import BriefSpec
 from .pipelines.phase0_instagram_copy import execute_instagram_copy_pipeline
+from .pipelines.phase0_brand_compliance_score import run_brand_compliance_score
+from .pipelines.phase0_brand_optimization import run_brand_optimization
+
+
+def _run_brand_compliance_adapter(repo_root: str, job_ref: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return run_brand_compliance_score(job_ref=job_ref, repo_root=repo_root, params=params)
+
+
+def _run_brand_optimization_adapter(repo_root: str, job_ref: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    manifest = run_brand_optimization(job_ref=job_ref, repo_root=repo_root, params=params)
+    artifact_dir = os.path.join(repo_root, "artifacts", manifest.job_id, manifest.run_id)
+    return {"run_id": manifest.run_id, "artifact_dir": artifact_dir}
 
 
 JOB_PIPELINE_REGISTRY = {
     "instagram_copy": execute_instagram_copy_pipeline,
+    "brand_compliance_score": _run_brand_compliance_adapter,
+    "brand_optimization": _run_brand_optimization_adapter,
 }
 
 

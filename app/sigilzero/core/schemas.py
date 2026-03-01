@@ -285,7 +285,7 @@ class RunManifest(BaseModel):
     # Job metadata
     job_ref: str  # Path to brief.yaml
     job_type: str
-    started_at: str = Field(exclude=True)  # BLOCKER 1 FIX: Exclude wall-clock time from determinism
+    started_at: Optional[str] = Field(default=None, exclude=True)  # Excluded from deterministic serialization
     finished_at: Optional[str] = Field(default=None, exclude=True)  # BLOCKER 1 FIX: Exclude wall-clock time
     status: str  # running, succeeded, failed
     
