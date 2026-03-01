@@ -312,6 +312,10 @@ class RunManifest(BaseModel):
     # Phase 8: Chain metadata (enables pipeline composition)
     chain_metadata: ChainMetadata = Field(default_factory=ChainMetadata)
     
+    # Stage 10: Schema migration tracking (Phase 1.0 audit trail)
+    migration_history: List[Dict[str, Any]] = Field(default_factory=list)
+    # Records: from_version, to_version, applied_at, changes, checksum_before, checksum_after
+    
     # Outputs and metadata
     artifacts: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     meta: Dict[str, Any] = Field(default_factory=dict)

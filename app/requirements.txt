@@ -8,3 +8,4 @@ pydantic
 langfuse
 openai
 pyyaml
+packaging
