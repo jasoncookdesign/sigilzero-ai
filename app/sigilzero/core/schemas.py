@@ -304,7 +304,9 @@ class RunManifest(BaseModel):
     generation_hash: Optional[str] = None
     
     # Langfuse tracing
-    langfuse_trace_id: Optional[str] = None
+    # BLOCKER B FIX: Exclude trace_id from deterministic manifest serialization.
+    # Trace IDs are observability metadata and nondeterministic across fresh runs.
+    langfuse_trace_id: Optional[str] = Field(default=None, exclude=True)
     
     # Stage 5: Generation mode metadata (for variants, format, etc.)
     generation_metadata: Dict[str, Any] = Field(default_factory=dict)
