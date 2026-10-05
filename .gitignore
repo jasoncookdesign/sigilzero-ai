@@ -220,3 +220,6 @@ artifacts/*/.tmp/
 artifacts/*/*/
 !artifacts/_write_test
 .streamlit/secrets.toml
+
+# macOS
+.DS_Store
